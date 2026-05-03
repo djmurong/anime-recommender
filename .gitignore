@@ -1,0 +1,181 @@
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# =============================================================================
+# Environment & secrets (never commit real credentials)
+# =============================================================================
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+secrets/
+credentials.json
+service-account*.json
+
+# =============================================================================
+# Node.js / npm / pnpm / yarn (frontend + any JS tooling at repo root)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+package-lock.json.bak
+
+# =============================================================================
+# Frontend build outputs (Vite, etc.)
+# =============================================================================
+dist/
+dist-ssr/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+*.local
+.vite/
+coverage/
+*.tsbuildinfo
+
+# =============================================================================
+# Python bytecode & packaging
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.virtualenv/
+
+# =============================================================================
+# Python tools & test artifacts
+# =============================================================================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.tox/
+.nox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+junit.xml
+pytestdebug.log
+
+# =============================================================================
+# Jupyter
+# =============================================================================
+.ipynb_checkpoints/
+profile_default/
+
+# =============================================================================
+# ML / MLOps (adjust if you intentionally version small artifacts)
+# =============================================================================
+mlruns/
+wandb/
+lightning_logs/
+tensorboard_logs/
+runs/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.pb
+*.h5
+*.ckpt
+*.safetensors
+
+# DVC local cache (keep `.dvc/` config tracked; cache is machine-local)
+.dvc/cache
+.dvc/tmp
+
+# =============================================================================
+# Data (uncomment patterns that match how you store large/raw datasets)
+# =============================================================================
+# data/raw/
+# data/processed/
+# *.parquet
+# *.feather
+
+# =============================================================================
+# Docker
+# =============================================================================
+*.log
+
+# =============================================================================
+# Editors & IDEs
+# =============================================================================
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# VS Code / Cursor — ignore local machine settings; allow shared snippets
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.log
+logs/
+.cache/
+tmp/
+temp/
+*.tmp
+*.temp
+.cache
+
+# Local SQLite / dev DB files
+*.db
+*.sqlite
+*.sqlite3
