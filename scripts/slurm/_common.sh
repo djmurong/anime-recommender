@@ -1,9 +1,10 @@
 # Shared runtime setup for all recsys SLURM jobs.
+# Sourced from scripts/slurm/*.sh — BASH_SOURCE here is the real repo path, not Slurm spool.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RECSYS_SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.sh
-source "${SCRIPT_DIR}/config.sh"
+source "${RECSYS_SLURM_DIR}/config.sh"
 
 cd "${RECSYS_ROOT}"
 mkdir -p logs

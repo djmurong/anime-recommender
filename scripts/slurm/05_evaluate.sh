@@ -10,9 +10,13 @@
 #SBATCH --partition=gpu
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  _SLURM_DIR="${SLURM_SUBMIT_DIR}/scripts/slurm"
+else
+  _SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 # shellcheck source=_common.sh
-source "${SCRIPT_DIR}/_common.sh"
+source "${_SLURM_DIR}/_common.sh"
 
 echo "=== evaluate_all ==="
 python -m recsys.cli.evaluate_all

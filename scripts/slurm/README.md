@@ -64,6 +64,10 @@ scancel JOBID
 
 ## Troubleshooting
 
+### `_common.sh: No such file or directory` (under `/var/spool/slurmd/...`)
+
+Slurm runs a **copy** of the job script from spool, so `BASH_SOURCE` is not `scripts/slurm/`. Submit from repo root via `bash scripts/slurm/submit_full_pipeline.sh` (uses `SLURM_SUBMIT_DIR` + `--chdir`).
+
 ### `Batch script contains DOS line breaks (\r\n)`
 
 Scripts edited on Windows (or copied into Open OnDemand from Windows) use CRLF line endings. Linux `sbatch` requires LF only.

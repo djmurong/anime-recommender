@@ -10,9 +10,14 @@
 #SBATCH --partition=cpu
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Slurm copies the script to spool; use submit cwd (repo root) to find scripts/slurm/.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  _SLURM_DIR="${SLURM_SUBMIT_DIR}/scripts/slurm"
+else
+  _SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 # shellcheck source=_common.sh
-source "${SCRIPT_DIR}/_common.sh"
+source "${_SLURM_DIR}/_common.sh"
 
 echo "=== preprocess (subset=${RECSYS_SUBSET}) ==="
 python -m recsys.cli.preprocess --subset "${RECSYS_SUBSET}"

@@ -22,23 +22,24 @@ ACCT=()
 if [[ -n "${RECSYS_SLURM_ACCOUNT:-}" ]]; then
   ACCT=(--account="${RECSYS_SLURM_ACCOUNT}")
 fi
+CHDIR=(--chdir="${RECSYS_ROOT}")
 
-PREP_ID=$(sbatch "${ACCT[@]}" --parsable --partition="${RECSYS_PARTITION_CPU}" \
+PREP_ID=$(sbatch "${ACCT[@]}" "${CHDIR[@]}" --parsable --partition="${RECSYS_PARTITION_CPU}" \
   "${SCRIPT_DIR}/01_preprocess.sh")
 
-BASE_ID=$(sbatch "${ACCT[@]}" --parsable --partition="${RECSYS_PARTITION_CPU}" \
+BASE_ID=$(sbatch "${ACCT[@]}" "${CHDIR[@]}" --parsable --partition="${RECSYS_PARTITION_CPU}" \
   --dependency="afterok:${PREP_ID}" "${SCRIPT_DIR}/02_train_baselines.sh")
 
-TUNE_ID=$(sbatch "${ACCT[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
+TUNE_ID=$(sbatch "${ACCT[@]}" "${CHDIR[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
   --dependency="afterok:${BASE_ID}" "${SCRIPT_DIR}/03_tune.sh")
 
-TRAIN_ID=$(sbatch "${ACCT[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
+TRAIN_ID=$(sbatch "${ACCT[@]}" "${CHDIR[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
   --dependency="afterok:${TUNE_ID}" "${SCRIPT_DIR}/04_train_two_tower.sh")
 
-EVAL_ID=$(sbatch "${ACCT[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
+EVAL_ID=$(sbatch "${ACCT[@]}" "${CHDIR[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
   --dependency="afterok:${TRAIN_ID}" "${SCRIPT_DIR}/05_evaluate.sh")
 
-INDEX_ID=$(sbatch "${ACCT[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
+INDEX_ID=$(sbatch "${ACCT[@]}" "${CHDIR[@]}" --parsable --partition="${RECSYS_PARTITION_GPU}" \
   --dependency="afterok:${EVAL_ID}" "${SCRIPT_DIR}/06_build_index.sh")
 
 echo "Jobs: prep=${PREP_ID} base=${BASE_ID} tune=${TUNE_ID} train=${TRAIN_ID} eval=${EVAL_ID} index=${INDEX_ID}"
