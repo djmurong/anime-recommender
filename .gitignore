@@ -132,12 +132,38 @@ checkpoints/
 .dvc/tmp
 
 # =============================================================================
-# Data (uncomment patterns that match how you store large/raw datasets)
+# Project data (large MAL CSVs — generate or download locally)
 # =============================================================================
-# data/raw/
-# data/processed/
-# *.parquet
-# *.feather
+data/*
+!data/.gitkeep
+!data/README.md
+
+# =============================================================================
+# Recsys generated artifacts (models, splits, FAISS, caches)
+# =============================================================================
+artifacts/
+artifacts/cache/
+artifacts/splits/
+artifacts/models/
+artifacts/indexes/
+artifacts/*.log
+
+# Feature / split files if stored outside artifacts/
+*.parquet
+*.feather
+*.npz
+synopsis_emb.npy
+
+# Downloaded embedding models (sentence-transformers / Hugging Face)
+.cache/huggingface/
+huggingface/
+
+# Hyperparameter search
+optuna_study.db
+*.optuna.db
+
+# Local plan / exports (optional)
+anime_recommender_revised_plan.pdf
 
 # =============================================================================
 # Docker
@@ -162,6 +188,7 @@ checkpoints/
 !.vscode/extensions.json
 !.vscode/launch.json
 !.vscode/tasks.json
+.cursor/
 
 # =============================================================================
 # Misc
@@ -173,7 +200,6 @@ tmp/
 temp/
 *.tmp
 *.temp
-.cache
 
 # Local SQLite / dev DB files
 *.db

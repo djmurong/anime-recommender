@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+from recsys.config import CFG, MODELS_DIR, TrainConfig
+from recsys.data.features_user import RECENCY_BUCKETS, UserFeaturePack
+from recsys.eval.metrics import ndcg_at_k, recall_at_k
+from recsys.models.losses import combined_ranking_loss
+from recsys.models.two_tower import (
+    TowerDims,
+    TwoTowerModel,
+    encode_all_anime,
+    feature_pack_to_tensors,
+    score_all_items,
+)
+from recsys.training.dataset import InteractionDataset, make_collate, make_train_sampler
+from recsys.training.hard_negatives import HardNegativeMiner
+
+
+@dataclass
+class TrainArtifacts:
+    model: TwoTowerModel
+    best_val: float
+    best_epoch: int
+
+
+def build_model_from_features(
+    feats: dict,
+    train_cfg: TrainConfig,
+    recency_dim: int = RECENCY_BUCKETS,
+    popularity_bias: np.ndarray | None = None,
+) -> TwoTowerModel:
+    n_anime = feats["numerical"].shape[0]
+    dims = TowerDims(
+        n_studios=len(feats["studio_vocab"]),
+        studio_emb_dim=train_cfg.studio_emb_dim,
+        n_genres=feats["genres"].shape[1],
+        n_numerical=feats["numerical"].shape[1],
+        synopsis_dim=feats["synopsis"].shape[1],
+        embedding_dim=train_cfg.embedding_dim,
+        hidden_dim=train_cfg.hidden_dim,
+        dropout=train_cfg.dropout,
+        n_anime=n_anime,
+    )
+    return TwoTowerModel(dims, recency_dim=recency_dim, popularity_bias=popularity_bias)
+
+
+def encode_history_batch(
+    model: TwoTowerModel,
+    history_idx: torch.Tensor,
+    history_mask: torch.Tensor,
+    anime_tensors: dict,
+    history_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    b, t = history_idx.shape
+    flat = history_idx.reshape(-1)
+    emb = model.encode_anime(
+        anime_tensors["numerical"][flat],
+        anime_tensors["genres"][flat],
+        anime_tensors["studio_idx"][flat],
+        anime_tensors["synopsis"][flat],
+    )
+    emb = emb.view(b, t, -1)
+    return model.pool_history(emb, history_mask, history_weights)
+
+
+def _gather_anime_features(anime_tensors: dict, idx: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return (
+        anime_tensors["numerical"][idx],
+        anime_tensors["genres"][idx],
+        anime_tensors["studio_idx"][idx],
+        anime_tensors["synopsis"][idx],
+    )
+
+
+def _sample_catalog_negatives(
+    n_anime: int,
+    positives_per_user: list[set[int]],
+    k: int,
+    rng: np.random.Generator,
+    max_tries: int = 50,
+) -> np.ndarray:
+    b = len(positives_per_user)
+    out = np.empty((b, k), dtype=np.int64)
+    for i, pos in enumerate(positives_per_user):
+        chosen: list[int] = []
+        tries = 0
+        while len(chosen) < k and tries < k * max_tries:
+            cands = rng.integers(0, n_anime, size=k * 2)
+            for c in cands:
+                if int(c) not in pos and int(c) not in chosen:
+                    chosen.append(int(c))
+                    if len(chosen) >= k:
+                        break
+            tries += 1
+        while len(chosen) < k:
+            c = int(rng.integers(0, n_anime))
+            if c not in pos:
+                chosen.append(c)
+        out[i] = np.array(chosen[:k], dtype=np.int64)
+    return out
+
+
+def _val_metrics(
+    model: TwoTowerModel,
+    anime_tensors: dict,
+    val: pd.DataFrame,
+    user_features: UserFeaturePack,
+    user_map: dict[str, int],
+    anime_map: dict[int, int],
+    train_cfg: TrainConfig,
+    k: int = 10,
+    max_users: int = 5000,
+) -> dict[str, float]:
+    if val.empty:
+        return {"recall@10": 0.0, "ndcg@10": 0.0}
+
+    val = val.copy()
+    val["user_idx"] = val["username"].map(user_map)
+    val["anime_idx"] = val["anime_id"].astype(int).map(anime_map)
+    val = val.dropna(subset=["user_idx", "anime_idx"])
+    val["user_idx"] = val["user_idx"].astype("int64")
+    val["anime_idx"] = val["anime_idx"].astype("int64")
+    if len(val) > max_users:
+        val = val.sample(max_users, random_state=CFG.seed)
+
+    model.eval()
+    with torch.no_grad():
+        all_anime = encode_all_anime(model, anime_tensors)
+        u_idx = val["user_idx"].to_numpy()
+        target = val["anime_idx"].to_numpy()
+        recalls = []
+        ndcgs = []
+        device = all_anime.device
+        affinity = torch.from_numpy(user_features.genre_affinity).to(device)
+        centered = torch.from_numpy(user_features.centered_avg_score).unsqueeze(-1).to(device)
+        recency = torch.from_numpy(user_features.recency).to(device)
+        use_weights = train_cfg.use_score_weighted_pool
+
+        batch = 256
+        for start in range(0, len(u_idx), batch):
+            ub = u_idx[start : start + batch]
+            tb = target[start : start + batch]
+            histories = [user_features.history.get(int(u), np.zeros(0, dtype=np.int64)) for u in ub]
+            hist_scores = [
+                user_features.history_scores.get(int(u), np.zeros(0, dtype=np.float32)) for u in ub
+            ]
+            max_h = max((len(h) for h in histories), default=1)
+            max_h = max(max_h, 1)
+            hist = np.zeros((len(ub), max_h), dtype=np.int64)
+            mask = np.zeros((len(ub), max_h), dtype=np.float32)
+            weights = np.zeros((len(ub), max_h), dtype=np.float32)
+            for i, h in enumerate(histories):
+                if len(h) == 0:
+                    continue
+                sc = hist_scores[i]
+                if len(h) > train_cfg.max_history_len:
+                    h = h[-train_cfg.max_history_len :]
+                    sc = sc[-train_cfg.max_history_len :]
+                hist[i, : len(h)] = h
+                mask[i, : len(h)] = 1.0
+                if use_weights:
+                    mu = float(user_features.centered_avg_score[int(ub[i])]) + 7.0
+                    weights[i, : len(h)] = np.maximum(sc - mu, 0.1)
+                else:
+                    weights[i, : len(h)] = 1.0
+            hist_t = torch.from_numpy(hist).to(device)
+            mask_t = torch.from_numpy(mask).to(device)
+            w_t = torch.from_numpy(weights).to(device) if use_weights else None
+            pooled = encode_history_batch(model, hist_t, mask_t, anime_tensors, w_t)
+            ub_t = torch.from_numpy(np.asarray(ub, dtype=np.int64)).to(device)
+            user_emb = model.encode_user(pooled, affinity[ub_t], centered[ub_t], recency[ub_t])
+            scores = score_all_items(model, user_emb, all_anime)
+            for i in range(len(ub)):
+                pos = histories[i]
+                if len(pos):
+                    scores[i, pos] = -float("inf")
+            topk = scores.topk(k, dim=1).indices.cpu().numpy()
+            for i, t_idx in enumerate(tb):
+                preds = topk[i]
+                recalls.append(recall_at_k(preds, [int(t_idx)], k))
+                ndcgs.append(ndcg_at_k(preds, [int(t_idx)], k))
+
+    return {
+        "recall@10": float(np.mean(recalls)) if recalls else 0.0,
+        "ndcg@10": float(np.mean(ndcgs)) if ndcgs else 0.0,
+    }
+
+
+def train(
+    model: TwoTowerModel,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    feats: dict,
+    user_features: UserFeaturePack,
+    user_map: dict[str, int],
+    anime_map: dict[int, int],
+    train_cfg: TrainConfig,
+    device: torch.device,
+    ckpt_path: Path | None = None,
+    progress: bool = True,
+    max_train_rows: int | None = None,
+) -> TrainArtifacts:
+    torch.manual_seed(CFG.seed)
+    np.random.seed(CFG.seed)
+    rng = np.random.default_rng(CFG.seed)
+
+    if max_train_rows is not None and len(train_df) > max_train_rows:
+        train_df = train_df.sample(max_train_rows, random_state=CFG.seed)
+
+    model = model.to(device)
+    anime_tensors = feature_pack_to_tensors(feats, device)
+    n_anime = feats["numerical"].shape[0]
+
+    dataset = InteractionDataset(train_df, user_map, anime_map, user_features)
+    collate = make_collate(user_features, n_anime, dataset.log_q)
+    sampler = make_train_sampler(dataset, seed=CFG.seed)
+    loader = DataLoader(
+        dataset,
+        batch_size=train_cfg.batch_size,
+        sampler=sampler,
+        num_workers=train_cfg.num_workers,
+        collate_fn=collate,
+        drop_last=True,
+        pin_memory=device.type == "cuda",
+    )
+
+    positives_lookup: dict[int, set[int]] = {
+        u: set(arr.tolist()) for u, arr in user_features.history.items()
+    }
+
+    miner = HardNegativeMiner(n_anime=n_anime, embedding_dim=train_cfg.embedding_dim)
+
+    optim = torch.optim.AdamW(
+        model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
+    )
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    best_val = -1.0
+    best_epoch = -1
+    ckpt_path = ckpt_path or (MODELS_DIR / "two_tower.pt")
+    use_weights = train_cfg.use_score_weighted_pool
+
+    for epoch in range(1, train_cfg.epochs + 1):
+        do_hardneg = train_cfg.hard_neg_ratio > 0 and epoch >= train_cfg.hard_neg_start_epoch
+        if do_hardneg and (
+            (epoch - train_cfg.hard_neg_start_epoch) % train_cfg.hard_neg_refresh_every == 0
+        ):
+            miner.refresh(model, anime_tensors, device)
+
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+
+        model.train()
+        running = 0.0
+        n_batches = 0
+        iterator = tqdm(loader, disable=not progress, desc=f"epoch {epoch}", leave=False)
+        for batch in iterator:
+            batch = {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
+            optim.zero_grad()
+            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+                pos_anime_emb = model.encode_anime(*_gather_anime_features(anime_tensors, batch["pos_anime_idx"]))
+                w_hist = batch["history_weights"] if use_weights else None
+                pooled_hist = encode_history_batch(
+                    model, batch["history_idx"], batch["history_mask"], anime_tensors, w_hist
+                )
+                user_emb = model.encode_user(
+                    pooled_hist, batch["genre_affinity"], batch["centered_score"], batch["recency"]
+                )
+
+                hard_emb = None
+                if do_hardneg:
+                    user_pos = [
+                        positives_lookup.get(int(u), set()) | {int(p)}
+                        for u, p in zip(batch["user_idx"].tolist(), batch["pos_anime_idx"].tolist())
+                    ]
+                    hard_emb = miner.mine(user_emb, user_pos, train_cfg.hard_neg_ratio, rng)
+
+                catalog_neg_emb = None
+                k_cat = train_cfg.catalog_neg_count
+                if k_cat > 0:
+                    user_pos = [
+                        positives_lookup.get(int(u), set()) | {int(p)}
+                        for u, p in zip(batch["user_idx"].tolist(), batch["pos_anime_idx"].tolist())
+                    ]
+                    neg_idx = _sample_catalog_negatives(n_anime, user_pos, k_cat, rng)
+                    neg_t = torch.from_numpy(neg_idx).to(device)
+                    flat = neg_t.reshape(-1)
+                    neg_emb = model.encode_anime(*_gather_anime_features(anime_tensors, flat))
+                    catalog_neg_emb = neg_emb.view(neg_t.size(0), k_cat, -1)
+
+                loss = combined_ranking_loss(
+                    user_emb=user_emb,
+                    pos_anime_emb=pos_anime_emb,
+                    log_q=batch["pos_log_q"],
+                    temperature=train_cfg.temperature,
+                    catalog_neg_emb=catalog_neg_emb,
+                    catalog_neg_weight=train_cfg.catalog_neg_weight,
+                    extra_neg_emb=hard_emb,
+                )
+
+            scaler.scale(loss).backward()
+            if train_cfg.grad_clip > 0:
+                scaler.unscale_(optim)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+            scaler.step(optim)
+            scaler.update()
+
+            running += float(loss.item())
+            n_batches += 1
+            if progress:
+                iterator.set_postfix(loss=f"{running / max(n_batches, 1):.4f}")
+
+        avg_loss = running / max(n_batches, 1)
+
+        if epoch % train_cfg.val_every_epoch == 0:
+            metrics = _val_metrics(
+                model, anime_tensors, val_df, user_features, user_map, anime_map, train_cfg
+            )
+            score = metrics["ndcg@10"]
+            if progress:
+                print(
+                    f"[epoch {epoch}] loss={avg_loss:.4f} val_ndcg@10={score:.4f} "
+                    f"val_recall@10={metrics['recall@10']:.4f}"
+                )
+            if score > best_val:
+                best_val = score
+                best_epoch = epoch
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "dims": vars(model.dims),
+                        "epoch": epoch,
+                        "val_ndcg10": score,
+                    },
+                    ckpt_path,
+                )
+
+    return TrainArtifacts(model=model, best_val=best_val, best_epoch=best_epoch)
