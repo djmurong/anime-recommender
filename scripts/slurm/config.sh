@@ -3,11 +3,11 @@
 
 # SLURM partitions (queue names)
 export RECSYS_PARTITION_CPU="common"
-export RECSYS_PARTITION_GPU="plusds-gpu"
+export RECSYS_PARTITION_GPU="scavenger-gpu"
 
 # Uncomment if your site requires an account flag:
 # export RECSYS_SLURM_ACCOUNT="#SBATCH --account=your_account"
-export RECSYS_SLURM_ACCOUNT="plusds"
+export RECSYS_SLURM_ACCOUNT="dataplus"
 
 # Optional: load site modules before activating the venv
 # Example: export RECSYS_MODULE_PYTHON="module load python3"
