@@ -1,7 +1,21 @@
+"""Offline evaluation harness.
+
+Two paths exist for the two-tower / cascade model:
+  * `evaluate_two_tower`: legacy brute-force full-catalog topk. Useful as a
+    ceiling on what the retriever can in principle return.
+  * `evaluate_cascade`: runs the same model through the four-stage cascade
+    (Retrieve -> PreRank -> Rank -> ReRank). This is what production sees and
+    is the eval row reported in `artifacts/eval.md` for cascade variants.
+
+Baselines (Popularity, ContentCosine, ImplicitMF) keep their existing full-
+catalog path on the completed-only data slice so their numbers stay comparable
+across the refactor.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -18,8 +32,14 @@ from recsys.eval.metrics import (
     serendipity,
 )
 from recsys.models.baselines import Recommender
-from recsys.models.two_tower import TwoTowerModel, encode_all_anime, feature_pack_to_tensors, score_all_items
-from recsys.training.trainer import encode_history_batch
+from recsys.models.two_tower import (
+    TwoTowerModel,
+    encode_all_anime,
+    feature_pack_to_tensors,
+    score_all_items,
+)
+from recsys.retrieval.cascade import Cascade
+from recsys.training.trainer import _build_val_history_batch, encode_history_batch
 
 
 @dataclass
@@ -84,6 +104,40 @@ def evaluate_baseline(
     )
 
 
+def _encode_user_embeddings_for_batch(
+    model: TwoTowerModel,
+    user_features: UserFeaturePack,
+    user_indices: np.ndarray,
+    anime_tensors: dict,
+    device: torch.device,
+    train_cfg=CFG.train,
+) -> torch.Tensor:
+    packed = _build_val_history_batch(user_features, user_indices, None, train_cfg)
+    affinity = torch.from_numpy(user_features.genre_affinity).to(device)
+    centered = torch.from_numpy(user_features.centered_avg_score).unsqueeze(-1).to(device)
+    recency = torch.from_numpy(user_features.recency).to(device)
+    hist_t = torch.from_numpy(packed["hist"]).to(device)
+    mask_t = torch.from_numpy(packed["mask"]).to(device)
+    w_t = torch.from_numpy(packed["weights"]).to(device)
+    scores_t = torch.from_numpy(packed["scores"]).to(device)
+    comp_t = torch.from_numpy(packed["completions"]).to(device)
+    days_t = torch.from_numpy(packed["days_ago"]).to(device)
+    pooled = encode_history_batch(
+        model,
+        hist_t,
+        mask_t,
+        anime_tensors,
+        w_t,
+        history_scores=scores_t,
+        history_completion=comp_t,
+        history_days_ago=days_t,
+        train_cfg=train_cfg,
+        training_mask_prob=0.0,
+    )
+    ub_t = torch.from_numpy(np.asarray(user_indices, dtype=np.int64)).to(device)
+    return model.encode_user(pooled, affinity[ub_t], centered[ub_t], recency[ub_t]), packed
+
+
 def evaluate_two_tower(
     model: TwoTowerModel,
     feats: dict,
@@ -98,21 +152,11 @@ def evaluate_two_tower(
     max_history_len: int | None = None,
     use_score_weighted_pool: bool | None = None,
 ) -> EvalResult:
-    max_history_len = max_history_len if max_history_len is not None else CFG.train.max_history_len
-    use_score_weighted_pool = (
-        use_score_weighted_pool
-        if use_score_weighted_pool is not None
-        else CFG.train.use_score_weighted_pool
-    )
-
+    """Brute-force full-catalog top-k. Kept for ceiling comparison."""
     device = CFG.device
     model = model.to(device).eval()
     anime_tensors = feature_pack_to_tensors(feats, device)
     u_idx, target = _build_test_pairs(test_df, user_map, anime_map, max_users)
-
-    affinity = torch.from_numpy(user_features.genre_affinity).to(device)
-    centered = torch.from_numpy(user_features.centered_avg_score).unsqueeze(-1).to(device)
-    recency = torch.from_numpy(user_features.recency).to(device)
 
     recalls, precs, ndcgs, ilds, serens = [], [], [], [], []
     rec_lists: list[np.ndarray] = []
@@ -122,38 +166,12 @@ def evaluate_two_tower(
         for start in range(0, len(u_idx), batch):
             ub = u_idx[start : start + batch]
             tb = target[start : start + batch]
-            histories = [user_features.history.get(int(u), np.zeros(0, dtype=np.int64)) for u in ub]
-            hist_scores = [
-                user_features.history_scores.get(int(u), np.zeros(0, dtype=np.float32)) for u in ub
-            ]
-            max_h = max((len(h) for h in histories), default=1)
-            max_h = max(max_h, 1)
-            hist = np.zeros((len(ub), max_h), dtype=np.int64)
-            mask = np.zeros((len(ub), max_h), dtype=np.float32)
-            weights = np.zeros((len(ub), max_h), dtype=np.float32)
-            for i, h in enumerate(histories):
-                if len(h) == 0:
-                    continue
-                sc = hist_scores[i]
-                if len(h) > max_history_len:
-                    h = h[-max_history_len:]
-                    sc = sc[-max_history_len:]
-                hist[i, : len(h)] = h
-                mask[i, : len(h)] = 1.0
-                if use_score_weighted_pool:
-                    mu = float(user_features.centered_avg_score[int(ub[i])]) + 7.0
-                    weights[i, : len(h)] = np.maximum(sc - mu, 0.1)
-                else:
-                    weights[i, : len(h)] = 1.0
-            hist_t = torch.from_numpy(hist).to(device)
-            mask_t = torch.from_numpy(mask).to(device)
-            w_t = torch.from_numpy(weights).to(device) if use_score_weighted_pool else None
-            pooled = encode_history_batch(model, hist_t, mask_t, anime_tensors, w_t)
-            ub_t = torch.from_numpy(np.asarray(ub, dtype=np.int64)).to(device)
-            user_emb = model.encode_user(pooled, affinity[ub_t], centered[ub_t], recency[ub_t])
+            user_emb, packed = _encode_user_embeddings_for_batch(
+                model, user_features, ub, anime_tensors, device
+            )
             scores = score_all_items(model, user_emb, all_anime)
             for i in range(len(ub)):
-                pos = histories[i]
+                pos = packed["histories"][i]
                 if len(pos):
                     scores[i, pos] = -float("inf")
             topk = scores.topk(k, dim=1).indices.cpu().numpy()
@@ -168,6 +186,78 @@ def evaluate_two_tower(
 
     return EvalResult(
         name="TwoTower",
+        recall10=float(np.mean(recalls)) if recalls else 0.0,
+        precision10=float(np.mean(precs)) if precs else 0.0,
+        ndcg10=float(np.mean(ndcgs)) if ndcgs else 0.0,
+        ild=float(np.mean(ilds)) if ilds else 0.0,
+        coverage=catalog_coverage(rec_lists, item_features_for_ild.shape[0]),
+        serendipity=float(np.mean(serens)) if serens else 0.0,
+    )
+
+
+def evaluate_cascade(
+    name: str,
+    model: TwoTowerModel,
+    cascade: Cascade,
+    feats: dict,
+    test_df: pd.DataFrame,
+    user_features: UserFeaturePack,
+    user_map: dict[str, int],
+    anime_map: dict[int, int],
+    item_features_for_ild: np.ndarray,
+    popularity_rank: np.ndarray,
+    k: int = 10,
+    max_users: int = 5000,
+) -> EvalResult:
+    """Run the same model through the four-stage cascade and score.
+
+    Differences vs `evaluate_two_tower`: candidate pool is bounded by
+    `cascade.pool_retrieve` (FAISS) instead of the full catalog, the prerank +
+    rank stages can re-order, and the reranker (MMR / DPP) shapes the final
+    list. This is what production sees, so the metrics here are the canonical
+    cascade row in `artifacts/eval.md`.
+    """
+    device = cascade.device
+    model = model.to(device).eval()
+    anime_tensors = feature_pack_to_tensors(feats, device)
+    u_idx, target = _build_test_pairs(test_df, user_map, anime_map, max_users)
+
+    recalls, precs, ndcgs, ilds, serens = [], [], [], [], []
+    rec_lists: list[np.ndarray] = []
+    with torch.no_grad():
+        # Encode users in batches; cascade itself runs per-user (small overhead).
+        batch = 128
+        for start in range(0, len(u_idx), batch):
+            ub = u_idx[start : start + batch]
+            tb = target[start : start + batch]
+            user_emb, packed = _encode_user_embeddings_for_batch(
+                model, user_features, ub, anime_tensors, device
+            )
+            for i in range(len(ub)):
+                pos = packed["histories"][i]
+                excl = set(int(x) for x in pos.tolist()) if len(pos) else set()
+                final_idxs, _ = cascade.recommend(
+                    user_emb=user_emb[i],
+                    excluded_anime_indices=excl,
+                    k=k,
+                )
+                if len(final_idxs) < k:
+                    # Pad with -1 so per-row metrics are still defined; these never match.
+                    final_idxs = np.concatenate(
+                        [final_idxs, -np.ones(k - len(final_idxs), dtype=np.int64)]
+                    )
+                preds = final_idxs.astype(np.int64)
+                recalls.append(recall_at_k(preds, [int(tb[i])], k))
+                precs.append(precision_at_k(preds, [int(tb[i])], k))
+                ndcgs.append(ndcg_at_k(preds, [int(tb[i])], k))
+                # ILD / coverage / serendipity expect valid indices; drop padding.
+                valid = preds[preds >= 0]
+                ilds.append(intra_list_diversity(valid, item_features_for_ild))
+                serens.append(serendipity(valid, [int(tb[i])], popularity_rank, k))
+                rec_lists.append(valid)
+
+    return EvalResult(
+        name=name,
         recall10=float(np.mean(recalls)) if recalls else 0.0,
         precision10=float(np.mean(precs)) if precs else 0.0,
         ndcg10=float(np.mean(ndcgs)) if ndcgs else 0.0,

@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 import numpy as np
+import torch
 
+from recsys.retrieval.cascade import Cascade
 from recsys.retrieval.index import AnimeIndex
-from recsys.retrieval.rerank import epsilon_greedy_inject, mmr_rerank
+from recsys.retrieval.rerank import epsilon_greedy_inject
 
 
 FallbackReason = Literal["onboarding", "popularity", "content_similarity"] | None
@@ -34,43 +36,38 @@ def _ensure_normalized(v: np.ndarray) -> np.ndarray:
 
 def recommend_for_known_user(
     user_emb: np.ndarray,                 # [D]
-    index: AnimeIndex,
+    cascade: Cascade,
     excluded_anime_ids: set[int],
     k: int,
-    candidate_pool: int,
-    rerank_pool: int,
-    mmr_lambda: float,
     exploration_epsilon: float,
     rng: np.random.Generator,
 ) -> list[Recommendation]:
-    user_emb = _ensure_normalized(user_emb)
-    scores, idxs = index.search(user_emb[None, :], candidate_pool)
-    scores, idxs = scores[0], idxs[0]
+    """Run the four-stage cascade for a known user.
 
-    keep_mask = np.array(
-        [index.index_to_anime_id[int(i)] not in excluded_anime_ids for i in idxs],
-        dtype=bool,
+    `excluded_anime_ids` are user-facing MAL ids; we convert to dense indices
+    against the FAISS index. Optional eps-greedy slot replacement is applied at
+    the very end so exploration sits outside the ranker.
+    """
+    user_emb_t = torch.from_numpy(_ensure_normalized(user_emb)).to(cascade.device)
+    excl_idx = {
+        cascade.index.anime_id_to_index[a]
+        for a in excluded_anime_ids
+        if a in cascade.index.anime_id_to_index
+    }
+
+    final_idxs, final_scores = cascade.recommend(
+        user_emb=user_emb_t,
+        excluded_anime_indices=excl_idx,
+        k=k * 2 if exploration_epsilon > 0 else k,
     )
-    scores = scores[keep_mask]
-    idxs = idxs[keep_mask]
-    if len(idxs) == 0:
+    if len(final_idxs) == 0:
         return []
 
-    rerank_n = min(rerank_pool, len(idxs))
-    cand_emb = index.embeddings[idxs[:rerank_n]]
-    chosen_local = mmr_rerank(
-        candidate_idxs=idxs[:rerank_n],
-        candidate_scores=scores[:rerank_n],
-        candidate_emb=cand_emb,
-        k=k,
-        lambda_=mmr_lambda,
-    )
-    final_idxs = idxs[chosen_local]
-    final_scores = scores[chosen_local]
-
-    explore_pool = idxs[rerank_n:]
-    final_idxs, exploratory_mask = epsilon_greedy_inject(
-        final_idxs=final_idxs,
+    chosen = final_idxs[:k]
+    chosen_scores = final_scores[:k]
+    explore_pool = final_idxs[k:]
+    chosen, exploratory_mask = epsilon_greedy_inject(
+        final_idxs=chosen,
         explore_pool=explore_pool,
         k=k,
         epsilon=exploration_epsilon,
@@ -78,9 +75,9 @@ def recommend_for_known_user(
     )
 
     out: list[Recommendation] = []
-    for rank_i, (idx, expl) in enumerate(zip(final_idxs, exploratory_mask)):
-        anime_id = index.index_to_anime_id[int(idx)]
-        sc = float(final_scores[rank_i]) if not expl else float("nan")
+    for rank_i, (idx, expl) in enumerate(zip(chosen, exploratory_mask)):
+        anime_id = cascade.index.index_to_anime_id[int(idx)]
+        sc = float(chosen_scores[rank_i]) if rank_i < len(chosen_scores) and not expl else float("nan")
         out.append(
             Recommendation(
                 anime_id=anime_id,
@@ -95,34 +92,33 @@ def recommend_for_known_user(
 
 def recommend_from_onboarding(
     onboarding: OnboardingInput,
-    index: AnimeIndex,
+    cascade: Cascade,
     genre_to_anime_idxs: dict[str, np.ndarray],
-    popularity_scores: np.ndarray,
     k: int,
-    candidate_pool: int,
-    rerank_pool: int,
-    mmr_lambda: float,
     exploration_epsilon: float,
     rng: np.random.Generator,
 ) -> list[Recommendation]:
-    """Step 2-4 of the fallback chain: onboarding -> content sim -> genre pool -> popularity."""
+    """Cold-start: build a seed user_emb from favorites/genres and run the cascade.
+
+    The item tower already runs purely on metadata (synopsis + genres + studio +
+    numerical), so a brand-new user with only a handful of favorite anime gets
+    real recommendations from the model itself -- no popularity fallback chain
+    sitting outside the ranker.
+    """
+    index = cascade.index
     fav_idx = [
         index.anime_id_to_index[a]
         for a in onboarding.favorite_anime_ids
         if a in index.anime_id_to_index
     ]
-
     if fav_idx:
         seed = index.embeddings[fav_idx].mean(axis=0)
         seed = _ensure_normalized(seed)
         recs = recommend_for_known_user(
             user_emb=seed,
-            index=index,
+            cascade=cascade,
             excluded_anime_ids=set(onboarding.favorite_anime_ids),
             k=k,
-            candidate_pool=candidate_pool,
-            rerank_pool=rerank_pool,
-            mmr_lambda=mmr_lambda,
             exploration_epsilon=exploration_epsilon,
             rng=rng,
         )
@@ -131,6 +127,7 @@ def recommend_from_onboarding(
         if recs:
             return recs
 
+    # Fallback: average embedding of items in the requested genres.
     genre_pool: list[int] = []
     for g in onboarding.favorite_genre_ids:
         idxs = genre_to_anime_idxs.get(g)
@@ -143,40 +140,17 @@ def recommend_from_onboarding(
         seed = _ensure_normalized(seed)
         recs = recommend_for_known_user(
             user_emb=seed,
-            index=index,
+            cascade=cascade,
             excluded_anime_ids=set(onboarding.favorite_anime_ids),
             k=k,
-            candidate_pool=candidate_pool,
-            rerank_pool=rerank_pool,
-            mmr_lambda=mmr_lambda,
             exploration_epsilon=exploration_epsilon,
             rng=rng,
         )
         for r in recs:
             r.fallback_reason = "content_similarity"
-        if recs:
-            return recs
+        return recs
 
-    order = np.argsort(-popularity_scores)
-    excl = set(onboarding.favorite_anime_ids)
-    top = []
-    for idx in order:
-        anime_id = index.index_to_anime_id[int(idx)]
-        if anime_id in excl:
-            continue
-        top.append((idx, popularity_scores[idx]))
-        if len(top) >= k:
-            break
-    return [
-        Recommendation(
-            anime_id=index.index_to_anime_id[int(i)],
-            score=float(s),
-            rank=rank + 1,
-            is_exploratory=False,
-            fallback_reason="popularity",
-        )
-        for rank, (i, s) in enumerate(top)
-    ]
+    return []
 
 
 def build_genre_to_indices(

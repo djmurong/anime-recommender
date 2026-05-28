@@ -9,11 +9,15 @@ import argparse
 import json
 import pickle
 
+import pandas as pd
+
 from recsys.config import (
     ARTIFACTS_DIR,
     CACHE_DIR,
+    CFG,
     SPLITS_DIR,
     SUBSET_PRESETS,
+    set_random_seed,
     set_thread_env,
 )
 from recsys.data.features_anime import build_anime_features
@@ -27,8 +31,9 @@ def main() -> None:
     set_thread_env()
     p = argparse.ArgumentParser()
     p.add_argument("--subset", choices=list(SUBSET_PRESETS), default="iter")
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=CFG.seed, help="RNG for subset + LOO split")
     args = p.parse_args()
+    set_random_seed(seed=args.seed)
 
     print("Loading anime catalog...")
     anime_df = load_anime()
@@ -36,10 +41,32 @@ def main() -> None:
     valid_ids = set(anime_df["anime_id"].astype(int).tolist())
     print(f"  {len(anime_df):,} anime")
 
+    anime_episodes = {
+        int(a): float(e) if pd.notna(e) and float(e) > 0 else float("nan")
+        for a, e in zip(anime_df["anime_id"].astype(int), anime_df["episodes"])
+    }
+
     print(f"Building subset='{args.subset}' from ratings (streaming)...")
     subset = get_subset(args.subset)
-    ratings = build_subset(subset, valid_anime_ids=valid_ids, seed=args.seed)
+    ratings = build_subset(
+        subset,
+        valid_anime_ids=valid_ids,
+        seed=args.seed,
+        anime_episodes=anime_episodes,
+    )
     print(f"  {len(ratings):,} interactions, {ratings['username'].nunique():,} users")
+    if "completion_fraction" in ratings.columns:
+        cf = ratings["completion_fraction"].astype(float)
+        print(
+            f"  status mix: "
+            + ", ".join(
+                f"s{int(k)}={int(v)}" for k, v in ratings["my_status"].value_counts().items()
+            )
+        )
+        print(
+            f"  completion_fraction: mean={cf.mean():.3f} "
+            f"p50={cf.median():.3f} >=0.8 frac={(cf >= 0.8).mean():.3f}"
+        )
 
     print("Computing leave-one-out split...")
     train, val, test = leave_one_out_split(ratings, seed=args.seed)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from recsys.retrieval.dpp import dpp_rerank
+
 
 def mmr_rerank(
     candidate_idxs: np.ndarray,       # [N]

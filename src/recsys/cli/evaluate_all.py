@@ -2,28 +2,48 @@
 
 Run:
     python -m recsys.cli.evaluate_all
+    python -m recsys.cli.evaluate_all --no-cascade  # skip cascade row
 """
 from __future__ import annotations
 
+import argparse
 import json
 import pickle
 
 import numpy as np
 import torch
 
-from recsys.config import ARTIFACTS_DIR, CACHE_DIR, CFG, MODELS_DIR, set_thread_env
+from recsys.config import (
+    ARTIFACTS_DIR,
+    CACHE_DIR,
+    CFG,
+    INDEX_DIR,
+    MODELS_DIR,
+    set_random_seed,
+    set_thread_env,
+)
 from recsys.data.features_anime import build_anime_features
 from recsys.data.features_user import RECENCY_BUCKETS
 from recsys.data.load import load_anime
 from recsys.data.split import load_splits
 from recsys.eval.harness import (
     evaluate_baseline,
+    evaluate_cascade,
     evaluate_two_tower,
     format_table,
     write_report,
 )
 from recsys.models.popularity_bias import build_popularity_bias_vector
-from recsys.models.two_tower import load_two_tower_from_checkpoint
+from recsys.models.ranker import MMoEServeFn
+from recsys.models.two_tower import (
+    encode_all_anime,
+    feature_pack_to_tensors,
+    load_two_tower_from_checkpoint,
+)
+from recsys.retrieval.cascade import make_default_cascade
+from recsys.retrieval.embedding_store import EmbeddingStore
+from recsys.retrieval.index import build_index, load_index
+from recsys.training.ranker_trainer import load_ranker
 
 
 def _popularity_rank(feats: dict) -> np.ndarray:
@@ -41,8 +61,62 @@ def _popularity_rank(feats: dict) -> np.ndarray:
     return rank
 
 
+def _load_or_build_index(model, feats, anime_tensors):
+    """Use the EmbeddingStore -> legacy FAISS index -> in-memory build, in order."""
+    # 1) Prefer the versioned EmbeddingStore. The cascade only cares about the
+    #    numeric embeddings; rebuilding FAISS over them is cheap relative to a
+    #    full re-encode of the catalog.
+    try:
+        store = EmbeddingStore()
+        cur = store.load("current")
+        if cur.embeddings.shape[0] == feats["numerical"].shape[0]:
+            print(f"  using EmbeddingStore current ({cur.manifest.get('version_tag', '?')})")
+            return build_index(
+                embeddings=cur.embeddings,
+                anime_ids=cur.anime_ids,
+                nlist=CFG.retrieval.faiss_nlist,
+                nprobe=CFG.retrieval.faiss_nprobe,
+            )
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"  EmbeddingStore unavailable ({e}), falling back to legacy index")
+
+    # 2) Legacy persisted FAISS index.
+    try:
+        idx = load_index()
+        if idx.embeddings.shape[0] == feats["numerical"].shape[0]:
+            return idx
+    except Exception:
+        pass
+
+    # 3) Final fallback: re-encode and build in-memory.
+    print("  building FAISS index in-memory...")
+    emb = encode_all_anime(model, anime_tensors).cpu().numpy()
+    return build_index(
+        embeddings=emb,
+        anime_ids=feats["anime_ids"],
+        nlist=CFG.retrieval.faiss_nlist,
+        nprobe=CFG.retrieval.faiss_nprobe,
+    )
+
+
 def main() -> None:
     set_thread_env()
+    set_random_seed()
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--no-cascade",
+        action="store_true",
+        help="Skip the cascade eval row (only run baselines + brute-force two-tower).",
+    )
+    p.add_argument(
+        "--cascade-name",
+        default="TwoTower+Cascade+Seq+CompWeighted",
+        help="Label for the cascade row in eval.md (Phase tag).",
+    )
+    args = p.parse_args()
+
     train, val, test = load_splits()
     user_map = json.loads((ARTIFACTS_DIR / "user_map.json").read_text())
     anime_map = {int(k): v for k, v in json.loads((ARTIFACTS_DIR / "anime_map.json").read_text()).items()}
@@ -83,7 +157,7 @@ def main() -> None:
             n_anime=feats["numerical"].shape[0],
             popularity_bias=pop_bias,
         )
-        print("Evaluating TwoTower...")
+        print("Evaluating TwoTower (brute-force full-catalog)...")
         results.append(
             evaluate_two_tower(
                 model=model,
@@ -96,6 +170,61 @@ def main() -> None:
                 popularity_rank=pop_rank,
             )
         )
+
+        if not args.no_cascade:
+            device = CFG.device
+            model_dev = model.to(device).eval()
+            anime_tensors = feature_pack_to_tensors(feats, device)
+            print("Evaluating TwoTower through the cascade...")
+            index = _load_or_build_index(model_dev, feats, anime_tensors)
+            item_emb_tensor = torch.from_numpy(index.embeddings).to(device)
+            ranker_path = MODELS_DIR / "ranker.pt"
+            ranker_fn = None
+            ranker_loaded = False
+            if ranker_path.exists():
+                mmoe, _ = load_ranker(ranker_path, map_location=device)
+                mmoe = mmoe.to(device).eval()
+                ranker_fn = MMoEServeFn(
+                    model=mmoe,
+                    w_completion=CFG.retrieval.mmoe_w_completion,
+                    w_rating=CFG.retrieval.mmoe_w_rating,
+                    w_drop=CFG.retrieval.mmoe_w_drop,
+                )
+                ranker_loaded = True
+                cascade_name = args.cascade_name + "+MMoE"
+            else:
+                cascade_name = args.cascade_name
+            cascade = make_default_cascade(
+                index=index,
+                item_emb_tensor=item_emb_tensor,
+                device=device,
+                preranker=None,
+                ranker=ranker_fn,
+                reranker_kind=CFG.retrieval.reranker,
+                mmr_lambda=CFG.retrieval.mmr_lambda,
+                dpp_theta=CFG.retrieval.dpp_theta,
+                pool_retrieve=CFG.retrieval.pool_retrieve,
+                pool_prerank=CFG.retrieval.pool_prerank,
+                pool_rank=CFG.retrieval.pool_rank,
+            )
+            if ranker_loaded:
+                print(f"  using MMoE ranker from {ranker_path}")
+            if CFG.retrieval.reranker == "dpp":
+                cascade_name = cascade_name + "+DPP"
+            results.append(
+                evaluate_cascade(
+                    name=cascade_name,
+                    model=model_dev,
+                    cascade=cascade,
+                    feats=feats,
+                    test_df=test,
+                    user_features=user_features,
+                    user_map=user_map,
+                    anime_map=anime_map,
+                    item_features_for_ild=item_features_for_ild,
+                    popularity_rank=pop_rank,
+                )
+            )
     else:
         print(f"No two-tower checkpoint at {ckpt_path}; skipping. Run cli.train_two_tower first.")
 

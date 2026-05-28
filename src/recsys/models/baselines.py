@@ -8,6 +8,8 @@ import pandas as pd
 import scipy.sparse as sp
 from sklearn.preprocessing import normalize
 
+from recsys.config import CFG
+
 
 class Recommender(ABC):
     name: str = "base"
@@ -149,7 +151,7 @@ class ImplicitMFRec(Recommender):
         mat = sp.coo_matrix((vals, (rows, cols)), shape=(n_users, n_items)).tocsr()
 
         k = min(self.factors, max(1, min(n_users, n_items) - 1))
-        svd = TruncatedSVD(n_components=k, n_iter=self.iterations, random_state=0)
+        svd = TruncatedSVD(n_components=k, n_iter=self.iterations, random_state=CFG.seed)
         user_factors = svd.fit_transform(mat).astype(np.float32)   # [n_users, k]
         item_factors = svd.components_.T.astype(np.float32)        # [n_items, k]
 

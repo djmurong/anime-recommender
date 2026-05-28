@@ -68,28 +68,63 @@ def _two_tower_topk(
     model = model.to(device).eval()
 
     anime_tensors = feature_pack_to_tensors(feats, device)
-    history = user_features.history.get(int(u_idx), np.zeros(0, dtype=np.int64))
-    hist_scores = user_features.history_scores.get(int(u_idx), np.zeros(0, dtype=np.float32))
+
+    # Prefer the rich "full" history (includes weak interactions) for the
+    # sequence encoder; fall back to the legacy strong-positive history.
+    if user_features.history_full is not None and int(u_idx) in user_features.history_full:
+        history = user_features.history_full[int(u_idx)]
+        hist_scores = user_features.history_full_scores[int(u_idx)]
+        hist_completion = user_features.history_full_completion[int(u_idx)]
+        hist_ts = user_features.history_full_ts_ns[int(u_idx)]
+    else:
+        history = user_features.history.get(int(u_idx), np.zeros(0, dtype=np.int64))
+        hist_scores = user_features.history_scores.get(int(u_idx), np.zeros(0, dtype=np.float32))
+        hist_completion = (hist_scores > 0).astype(np.float32)
+        hist_ts = np.zeros(len(history), dtype=np.int64)
+
     max_h = CFG.train.max_history_len
     if len(history) > max_h:
         history = history[-max_h:]
         hist_scores = hist_scores[-max_h:]
+        hist_completion = hist_completion[-max_h:]
+        hist_ts = hist_ts[-max_h:]
     max_h = max(len(history), 1)
     hist = np.zeros((1, max_h), dtype=np.int64)
     mask = np.zeros((1, max_h), dtype=np.float32)
     weights = np.zeros((1, max_h), dtype=np.float32)
+    scores_h = np.zeros((1, max_h), dtype=np.float32)
+    comp_h = np.zeros((1, max_h), dtype=np.float32)
+    days_h = np.zeros((1, max_h), dtype=np.float32)
     if len(history):
         hist[0, : len(history)] = history
         mask[0, : len(history)] = 1.0
         mu = float(user_features.centered_avg_score[int(u_idx)]) + 7.0
         weights[0, : len(history)] = np.maximum(hist_scores - mu, 0.1)
+        scores_h[0, : len(history)] = hist_scores
+        comp_h[0, : len(history)] = hist_completion
+        ref_ts = int(hist_ts.max()) if len(hist_ts) else 0
+        days_h[0, : len(history)] = (ref_ts - hist_ts) / (86400.0 * 1e9)
 
     with torch.no_grad():
         all_anime = encode_all_anime(model, anime_tensors)
         hist_t = torch.from_numpy(hist).to(device)
         mask_t = torch.from_numpy(mask).to(device)
         w_t = torch.from_numpy(weights).to(device) if CFG.train.use_score_weighted_pool else None
-        pooled = encode_history_batch(model, hist_t, mask_t, anime_tensors, w_t)
+        scores_t = torch.from_numpy(scores_h).to(device)
+        comp_t = torch.from_numpy(comp_h).to(device)
+        days_t = torch.from_numpy(days_h).to(device)
+        pooled = encode_history_batch(
+            model,
+            hist_t,
+            mask_t,
+            anime_tensors,
+            w_t,
+            history_scores=scores_t,
+            history_completion=comp_t,
+            history_days_ago=days_t,
+            train_cfg=CFG.train,
+            training_mask_prob=0.0,
+        )
         affinity = torch.from_numpy(user_features.genre_affinity[int(u_idx) : int(u_idx) + 1]).to(device)
         centered = torch.from_numpy(user_features.centered_avg_score[int(u_idx) : int(u_idx) + 1]).unsqueeze(-1).to(device)
         recency = torch.from_numpy(user_features.recency[int(u_idx) : int(u_idx) + 1]).to(device)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-
+import numpy as np
 import torch
 
 
@@ -26,9 +26,20 @@ USERS_CSV = DATA_DIR / "users_filtered.csv"
 RATINGS_CSV = DATA_DIR / "animelists_filtered.csv"
 
 
+# Single source of truth for preprocess, training, baselines, Optuna, and eval subsampling.
 SEED = 42
 MIN_USER_RATINGS = 5
 COMPLETED_STATUS = 2
+
+# Cascade refactor: we no longer drop incomplete watches.
+# MAL my_status values (per the dump):
+#   1 = watching, 2 = completed, 3 = on-hold, 4 = dropped, 6 = plan-to-watch
+# All five are kept so the MMoE ranker has completion/drop/start signal to learn from.
+KEEP_STATUSES: tuple[int, ...] = (1, 2, 3, 4, 6)
+
+# Rows with completion_fraction >= this AND status == 2 are eligible as "strong positives"
+# used by the leave-one-out test target and the in-batch sampled softmax positive.
+MIN_COMPLETION_FOR_POSITIVE = 0.8
 
 
 @dataclass
@@ -67,7 +78,26 @@ class TrainConfig:
     catalog_neg_weight: float = 1.0
     recency_sample_tau_days: float = 180.0
     max_history_len: int = 100
+    # When True the user history is pooled via a small Transformer (see models.sequence).
+    # When False we fall back to the old score-weighted mean pool.
+    use_sequence_encoder: bool = True
     use_score_weighted_pool: bool = True
+    # Sequence encoder hyperparameters (only used when use_sequence_encoder=True).
+    seq_n_layers: int = 4
+    seq_n_heads: int = 4
+    seq_ffn_mult: int = 2
+    seq_p_mask_recent: float = 0.3
+    seq_mask_window_min: int = 5
+    seq_mask_window_max: int = 30
+    # Completion-weighted loss. pos_weight = clip(completion_fraction, floor) * (1 + max(rating_z, 0)).
+    use_completion_weighted_loss: bool = True
+    completion_floor: float = 0.1
+    # Curriculum hard negatives. K is linearly interpolated from K_easy at hard_neg_start_epoch
+    # down to K_hard at the final epoch. Earlier epochs see far-out (easy) negatives;
+    # later epochs see near-miss (hard) negatives.
+    hard_neg_curriculum: bool = True
+    hard_neg_K_easy: int = 5000
+    hard_neg_K_hard: int = 200
 
 
 @dataclass
@@ -80,12 +110,23 @@ class TuneConfig:
 @dataclass
 class RetrievalConfig:
     top_k: int = 10
+    # Cascade pool sizes: Retrieve (FAISS) -> PreRank (light MLP) -> Rank (MMoE) -> ReRank.
+    pool_retrieve: int = 1000
+    pool_prerank: int = 200
+    pool_rank: int = 50
+    # Legacy aliases used by the old recommend_for_known_user serving helper.
     candidate_pool: int = 200
     rerank_pool: int = 100
     mmr_lambda: float = 0.7
+    dpp_theta: float = 0.5
+    reranker: str = "mmr"  # "mmr" (Phase 1/2 default) or "dpp" (Phase 3 default).
     exploration_epsilon: float = 0.1
     faiss_nlist: int = 64
     faiss_nprobe: int = 8
+    # MMoE head weights at serve time. Final score = sum(weight * head_output).
+    mmoe_w_completion: float = 0.5
+    mmoe_w_rating: float = 0.3
+    mmoe_w_drop: float = -0.2
 
 
 @dataclass
@@ -153,3 +194,20 @@ def set_thread_env():
     """Limit BLAS threads to avoid implicit/numpy contention on Windows."""
     for var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
         os.environ.setdefault(var, "1")
+
+
+def set_random_seed(
+    seed: int | None = None,
+    device: torch.device | None = None,
+) -> np.random.Generator:
+    """Seed NumPy and PyTorch RNGs for repeatable runs.
+
+    Does not set ``cudnn.deterministic`` (keeps GPU fast; training may still vary slightly).
+    """
+    s = CFG.seed if seed is None else seed
+    np.random.seed(s)
+    torch.manual_seed(s)
+    dev = device if device is not None else CFG.device
+    if dev.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(s)
+    return np.random.default_rng(s)

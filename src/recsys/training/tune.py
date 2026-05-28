@@ -9,7 +9,7 @@ import pandas as pd
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
-from recsys.config import ARTIFACTS_DIR, CFG, TrainConfig
+from recsys.config import ARTIFACTS_DIR, CFG, TrainConfig, set_random_seed
 from recsys.data.features_user import UserFeaturePack
 from recsys.training.trainer import build_model_from_features, train
 
@@ -47,6 +47,18 @@ def make_objective(
             recency_sample_tau_days=CFG.train.recency_sample_tau_days,
             max_history_len=CFG.train.max_history_len,
             use_score_weighted_pool=True,
+            use_sequence_encoder=CFG.train.use_sequence_encoder,
+            seq_n_layers=CFG.train.seq_n_layers,
+            seq_n_heads=CFG.train.seq_n_heads,
+            seq_ffn_mult=CFG.train.seq_ffn_mult,
+            seq_p_mask_recent=trial.suggest_float("seq_p_mask_recent", 0.0, 0.5)
+            if CFG.train.use_sequence_encoder
+            else 0.0,
+            use_completion_weighted_loss=CFG.train.use_completion_weighted_loss,
+            completion_floor=CFG.train.completion_floor,
+            hard_neg_curriculum=CFG.train.hard_neg_curriculum,
+            hard_neg_K_easy=CFG.train.hard_neg_K_easy,
+            hard_neg_K_hard=CFG.train.hard_neg_K_hard,
         )
         model = build_model_from_features(feats, cfg, popularity_bias=popularity_bias)
         artifacts = train(
@@ -82,7 +94,8 @@ def run_study(
     out_path: Path | None = None,
     max_train_rows: int | None = 2_000_000,
 ) -> dict:
-    sampler = TPESampler(seed=CFG.seed)
+    set_random_seed()
+    sampler = TPESampler(seed=CFG.tune.sampler_seed)
     pruner = MedianPruner(n_warmup_steps=CFG.tune.pruner_warmup_epochs)
     study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     objective = make_objective(

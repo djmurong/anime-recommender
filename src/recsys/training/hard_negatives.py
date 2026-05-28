@@ -7,11 +7,15 @@ from recsys.models.two_tower import TwoTowerModel, encode_all_anime
 
 
 class HardNegativeMiner:
-    """FAISS-backed hard negative miner.
+    """FAISS-backed hard negative miner with optional curriculum.
 
-    Refresh the index after each scheduled epoch with the current anime tower outputs;
-    `mine` returns top-k anime indices by inner-product similarity to a batch of user
-    embeddings, filtered against per-user known positives.
+    `refresh` rebuilds the FAISS index from the current anime tower outputs.
+    `mine` returns the top-`candidate_pool_k` anime by inner product with each
+    user embedding, then randomly samples k of them per row (after removing
+    known positives). Sampling within a wider pool gives "easy" negatives;
+    sampling within a narrow pool gives "hard" near-miss negatives. The trainer
+    schedules `candidate_pool_k` to shrink linearly across epochs, which is the
+    PinSage curriculum-learning recipe.
     """
 
     def __init__(self, n_anime: int, embedding_dim: int):
@@ -35,13 +39,48 @@ class HardNegativeMiner:
         positives_per_user: list[set[int]],
         k: int,
         rng: np.random.Generator,
+        candidate_pool_k: int = -1,
     ) -> torch.Tensor:
-        """Returns [B, k, D] tensor of hard negative anime embeddings (or empty if disabled)."""
+        """Returns [B, k, D] tensor of hard negative anime embeddings.
+
+        Args:
+            user_emb: query embeddings.
+            positives_per_user: per-row set of indices to filter out.
+            k: number of hard negatives per row.
+            rng: random generator for in-pool sampling.
+            candidate_pool_k: size of the candidate pool to sample from.
+                If <= 0, falls back to the legacy behavior (take the top-k
+                hits directly with a small oversample).
+        """
         if self._index is None or self._anime_emb_cpu is None or k <= 0:
             return user_emb.new_zeros((user_emb.size(0), 0, user_emb.size(1)))
 
         q = user_emb.detach().cpu().numpy().astype(np.float32)
-        # Pull more candidates than needed so we can drop user positives without underfilling.
+
+        if candidate_pool_k > 0:
+            pool = min(candidate_pool_k, self.n_anime)
+            _scores, idxs = self._index.search(q, pool)
+            chosen = np.empty((q.shape[0], k), dtype=np.int64)
+            for i, row in enumerate(idxs):
+                pos = positives_per_user[i]
+                cands = np.array(
+                    [int(a) for a in row if int(a) >= 0 and int(a) not in pos],
+                    dtype=np.int64,
+                )
+                if len(cands) >= k:
+                    sample = rng.choice(cands, size=k, replace=False)
+                else:
+                    # Top up with uniform draws if too few survived filtering.
+                    deficit = k - len(cands)
+                    rand = rng.integers(0, self.n_anime, size=deficit * 4)
+                    rand = np.array([int(r) for r in rand if int(r) not in pos][:deficit])
+                    while len(rand) < deficit:
+                        rand = np.append(rand, int(rng.integers(0, self.n_anime)))
+                    sample = np.concatenate([cands, rand[:deficit]])
+                chosen[i] = sample
+            return torch.from_numpy(self._anime_emb_cpu[chosen]).to(user_emb.device)
+
+        # Legacy path: pull a small oversample and take the top-k.
         oversample = max(k * 4, 32)
         _scores, idxs = self._index.search(q, oversample)
         chosen = np.empty((q.shape[0], k), dtype=np.int64)

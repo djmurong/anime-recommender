@@ -20,6 +20,7 @@ from recsys.config import (
     MODELS_DIR,
     TrainConfig,
     resolve_device,
+    set_random_seed,
     set_thread_env,
 )
 from recsys.data.features_anime import build_anime_features
@@ -63,6 +64,7 @@ def main() -> None:
 
     device_name = "cpu" if args.cpu else args.device
     device = resolve_device(device_name)
+    set_random_seed(device=device)
 
     train_df, val_df, _ = load_splits()
     user_map, anime_map = _load_id_maps()

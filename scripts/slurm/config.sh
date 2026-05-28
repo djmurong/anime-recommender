@@ -1,20 +1,27 @@
 # Edit these for your cluster (see: sinfo, module avail, site docs)
 # Source this file from other scripts in this directory — do not run alone.
 
-# SLURM partitions (queue names)
-export RECSYS_PARTITION_CPU="common"
-export RECSYS_PARTITION_GPU="scavenger-gpu"
-
-# Uncomment if your site requires an account flag:
-# export RECSYS_SLURM_ACCOUNT="#SBATCH --account=your_account"
-export RECSYS_SLURM_ACCOUNT="dataplus"
-
-# Optional: load site modules before activating the venv
-# Example: export RECSYS_MODULE_PYTHON="module load python3"
-export RECSYS_MODULE_PYTHON="${RECSYS_MODULE_PYTHON:-}"
-
 # Project root (directory that contains src/, data/, artifacts/)
 export RECSYS_ROOT="${RECSYS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+# Optional: load RECSYS_* values from repo-root .env
+if [[ -f "${RECSYS_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${RECSYS_ROOT}/.env"
+  set +a
+fi
+
+# SLURM partitions (queue names)
+export RECSYS_PARTITION_CPU="${RECSYS_PARTITION_CPU:-common}"
+export RECSYS_PARTITION_GPU="${RECSYS_PARTITION_GPU:-scavenger-gpu}"
+
+# Slurm account name (example: dataplus). Leave empty if site/account does not require it.
+export RECSYS_SLURM_ACCOUNT="${RECSYS_SLURM_ACCOUNT:-dataplus}"
+
+# Optional: load site modules before activating the venv
+# Example: RECSYS_MODULE_PYTHON="module load python3"
+export RECSYS_MODULE_PYTHON="${RECSYS_MODULE_PYTHON:-}"
 
 # Preprocess subset: iter (fast) or full
 export RECSYS_SUBSET="${RECSYS_SUBSET:-full}"

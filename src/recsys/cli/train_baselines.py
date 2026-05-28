@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import pickle
 
-from recsys.config import ARTIFACTS_DIR, MODELS_DIR, set_thread_env
+from recsys.config import ARTIFACTS_DIR, MODELS_DIR, set_random_seed, set_thread_env
 from recsys.data.features_anime import build_anime_features
 from recsys.data.load import load_anime
 from recsys.data.split import load_splits
@@ -32,6 +32,7 @@ def _build_content_matrix(feats: dict) -> "np.ndarray":
 
 def main() -> None:
     set_thread_env()
+    set_random_seed()
     train, _, _ = load_splits()
     anime_df = load_anime().sort_values("anime_id", kind="stable").reset_index(drop=True)
     user_map, anime_map = _load_id_maps()

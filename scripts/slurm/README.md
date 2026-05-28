@@ -8,6 +8,7 @@ cd /path/to/anime-recommender
 # 1) Edit cluster settings
 nano scripts/slurm/config.sh
 #   RECSYS_PARTITION_CPU, RECSYS_PARTITION_GPU, RECSYS_MODULE_PYTHON, RECSYS_SLURM_ACCOUNT
+#   Reproducibility: change SEED / CFG.seed in src/recsys/config.py (default 42); re-run preprocess if you change it.
 
 # 2) Python env + CUDA PyTorch (GPU training)
 python3 -m venv .venv
@@ -37,6 +38,7 @@ From **repo root**:
 | `bash scripts/slurm/submit_full_pipeline.sh` | preprocess → baselines → train → eval → index |
 | `bash scripts/slurm/submit_train_eval.sh` | skip preprocess (need `artifacts/` already) |
 | `bash scripts/slurm/submit_with_tune.sh` | full + Optuna + `train --best` |
+| `bash scripts/slurm/submit_with_tune_and_ranker.sh` | full + Optuna + two-tower + MMoE ranker; emits `eval_phase1.md` (no MMoE) and `eval.md` (with MMoE) |
 
 Override partitions for one run:
 
@@ -103,6 +105,16 @@ Key files: `artifacts/models/two_tower.pt`, `artifacts/eval.md`, `artifacts/best
 | `01_preprocess.sh` | Build splits, maps, features |
 | `02_train_baselines.sh` | Popularity / MF / content baselines |
 | `03_tune.sh` | Optuna search (optional) |
-| `04_train_two_tower.sh` | Main GPU training |
+| `04_train_two_tower.sh` | Main GPU training (Transformer history + completion-weighted loss) |
+| `04b_train_ranker.sh` | Train the MMoE ranker on top of the two-tower retriever |
 | `05_evaluate.sh` | Metrics table → `artifacts/eval.md` |
 | `06_build_index.sh` | FAISS index for serving |
+
+## Expected eval.md rows
+
+After the full pipeline finishes you should see one row per baseline plus two
+two-tower rows: brute-force full-catalog (`TwoTower`) and cascade
+(`TwoTower+Cascade+Seq+CompWeighted` in Phase 1, gaining suffixes as you
+re-train with the MMoE ranker and DPP rerank in later phases). The cascade row
+is the canonical production-shape number; the brute-force row is kept as a
+retrieval ceiling.
