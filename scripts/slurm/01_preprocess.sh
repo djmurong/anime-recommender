@@ -7,7 +7,7 @@
 #SBATCH --mem=64G
 
 # Partition/account overridden by submit_*.sh (sbatch --partition=...)
-#SBATCH --partition=cpu
+#SBATCH --partition=common
 
 set -euo pipefail
 # Slurm copies the script to spool; use submit cwd (repo root) to find scripts/slurm/.

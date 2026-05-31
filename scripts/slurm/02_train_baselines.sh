@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 
-#SBATCH --partition=cpu
+#SBATCH --partition=common
 
 set -euo pipefail
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
