@@ -7,7 +7,7 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 
-#SBATCH --partition=scavenger-gpu
+#SBATCH --partition=common-gpu
 
 set -euo pipefail
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -25,11 +25,10 @@ if [[ "${RECSYS_USE_BEST_PARAMS}" == "1" ]]; then
   BEST_FLAG=(--best)
 fi
 
-# DataLoader workers (only added if set, so default 0 from TrainConfig still applies)
-PERF_FLAGS=()
-[[ -n "${RECSYS_NUM_WORKERS:-}" ]] && PERF_FLAGS+=(--num-workers "${RECSYS_NUM_WORKERS}")
+# DataLoader workers (default 8 via config.sh; override with RECSYS_NUM_WORKERS=0 etc.)
+PERF_FLAGS=(--num-workers "${RECSYS_NUM_WORKERS}")
 
-echo "=== train_two_tower epochs=${RECSYS_EPOCHS} batch=${RECSYS_BATCH_SIZE} workers=${RECSYS_NUM_WORKERS:-default} ==="
+echo "=== train_two_tower epochs=${RECSYS_EPOCHS} batch=${RECSYS_BATCH_SIZE} workers=${RECSYS_NUM_WORKERS} ==="
 python -m recsys.cli.train_two_tower \
   "${BEST_FLAG[@]}" \
   --epochs "${RECSYS_EPOCHS}" \

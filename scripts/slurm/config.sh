@@ -14,7 +14,7 @@ fi
 
 # SLURM partitions (queue names)
 export RECSYS_PARTITION_CPU="${RECSYS_PARTITION_CPU:-common}"
-export RECSYS_PARTITION_GPU="${RECSYS_PARTITION_GPU:-scavenger-gpu}"
+export RECSYS_PARTITION_GPU="${RECSYS_PARTITION_GPU:-common-gpu}"
 
 # Slurm account name (example: dataplus). Leave empty if site/account does not require it.
 export RECSYS_SLURM_ACCOUNT="${RECSYS_SLURM_ACCOUNT:-dataplus}"
@@ -30,6 +30,7 @@ export RECSYS_SUBSET="${RECSYS_SUBSET:-full}"
 export RECSYS_EPOCHS="${RECSYS_EPOCHS:-10}"
 export RECSYS_BATCH_SIZE="${RECSYS_BATCH_SIZE:-2048}"
 export RECSYS_USE_BEST_PARAMS="${RECSYS_USE_BEST_PARAMS:-0}"  # set to 1 after tune
+export RECSYS_NUM_WORKERS="${RECSYS_NUM_WORKERS:-8}"  # DataLoader workers (0 = GPU starves)
 
 # Optuna (optional step)
 export RECSYS_TUNE_TRIALS="${RECSYS_TUNE_TRIALS:-30}"

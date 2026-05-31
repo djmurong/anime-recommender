@@ -21,7 +21,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu124   # match s
 #    data/anime_cleaned.csv, data/users_filtered.csv, data/animelists_filtered.csv
 
 # 4) Optional: test GPU inside an allocation
-srun --partition=scavenger-gpu --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=00:15:00 --pty bash
+srun --partition=common-gpu --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=00:15:00 --pty bash
 source .venv/bin/activate
 python -c "import torch; print(torch.cuda.is_available())"
 exit
@@ -52,8 +52,8 @@ RECSYS_PARTITION_CPU=shared RECSYS_PARTITION_GPU=gpu-v100 \
 ```bash
 sbatch --partition=common scripts/slurm/01_preprocess.sh
 sbatch --partition=common scripts/slurm/02_train_baselines.sh
-sbatch --partition=scavenger-gpu --gres=gpu:1 scripts/slurm/04_train_two_tower.sh
-sbatch --partition=scavenger-gpu --gres=gpu:1 scripts/slurm/05_evaluate.sh
+sbatch --partition=common-gpu --gres=gpu:1 scripts/slurm/04_train_two_tower.sh
+sbatch --partition=common-gpu --gres=gpu:1 scripts/slurm/05_evaluate.sh
 ```
 
 ## Monitor / cancel

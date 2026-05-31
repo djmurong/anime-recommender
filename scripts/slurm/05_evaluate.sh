@@ -7,7 +7,7 @@
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
 
-#SBATCH --partition=scavenger-gpu
+#SBATCH --partition=common-gpu
 
 set -euo pipefail
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
