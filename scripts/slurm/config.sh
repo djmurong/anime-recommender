@@ -14,7 +14,7 @@ fi
 
 # SLURM partitions (queue names)
 export RECSYS_PARTITION_CPU="${RECSYS_PARTITION_CPU:-common}"
-export RECSYS_PARTITION_GPU="${RECSYS_PARTITION_GPU:-common-gpu}"
+export RECSYS_PARTITION_GPU="${RECSYS_PARTITION_GPU:-common}"
 
 # Slurm account name (example: dataplus). Leave empty if site/account does not require it.
 export RECSYS_SLURM_ACCOUNT="${RECSYS_SLURM_ACCOUNT:-dataplus}"
