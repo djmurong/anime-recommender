@@ -361,6 +361,12 @@ def train(
         completion_floor=train_cfg.completion_floor,
     )
     sampler = make_train_sampler(dataset, seed=CFG.seed)
+    loader_kwargs: dict[str, object] = {}
+    if train_cfg.num_workers > 0:
+        # Keep workers alive across epochs (avoids 10-30s respawn) and prefetch
+        # a few batches ahead so the GPU never waits on data prep.
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 4
     loader = DataLoader(
         dataset,
         batch_size=train_cfg.batch_size,
@@ -369,6 +375,7 @@ def train(
         collate_fn=collate,
         drop_last=True,
         pin_memory=device.type == "cuda",
+        **loader_kwargs,
     )
 
     positives_lookup: dict[int, set[int]] = {

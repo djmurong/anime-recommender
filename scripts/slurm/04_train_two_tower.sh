@@ -25,10 +25,15 @@ if [[ "${RECSYS_USE_BEST_PARAMS}" == "1" ]]; then
   BEST_FLAG=(--best)
 fi
 
-echo "=== train_two_tower epochs=${RECSYS_EPOCHS} batch=${RECSYS_BATCH_SIZE} ==="
+# DataLoader workers (only added if set, so default 0 from TrainConfig still applies)
+PERF_FLAGS=()
+[[ -n "${RECSYS_NUM_WORKERS:-}" ]] && PERF_FLAGS+=(--num-workers "${RECSYS_NUM_WORKERS}")
+
+echo "=== train_two_tower epochs=${RECSYS_EPOCHS} batch=${RECSYS_BATCH_SIZE} workers=${RECSYS_NUM_WORKERS:-default} ==="
 python -m recsys.cli.train_two_tower \
   "${BEST_FLAG[@]}" \
   --epochs "${RECSYS_EPOCHS}" \
   --device cuda \
-  --batch-size "${RECSYS_BATCH_SIZE}"
+  --batch-size "${RECSYS_BATCH_SIZE}" \
+  "${PERF_FLAGS[@]}"
 echo "=== done ==="

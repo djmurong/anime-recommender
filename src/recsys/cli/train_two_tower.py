@@ -60,6 +60,12 @@ def main() -> None:
         default=None,
         help="Optional cap on training rows (for smoke tests)",
     )
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="DataLoader workers. 0 = main-thread (GPU starves). 4-8 is usually right on a single GPU.",
+    )
     args = p.parse_args()
 
     device_name = "cpu" if args.cpu else args.device
@@ -85,6 +91,11 @@ def main() -> None:
             if hasattr(train_cfg, k):
                 setattr(train_cfg, k, v)
         print(f"Loaded best params: {best}")
+
+    # CLI overrides take precedence over --best (so you can tune at submit
+    # time without re-running Optuna).
+    if args.num_workers is not None:
+        train_cfg.num_workers = args.num_workers
 
     print(f"Training on device={device}")
     print(f"  config={asdict(train_cfg)}")
