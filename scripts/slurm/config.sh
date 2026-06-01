@@ -30,7 +30,9 @@ export RECSYS_SUBSET="${RECSYS_SUBSET:-full}"
 export RECSYS_EPOCHS="${RECSYS_EPOCHS:-10}"
 export RECSYS_BATCH_SIZE="${RECSYS_BATCH_SIZE:-2048}"
 export RECSYS_USE_BEST_PARAMS="${RECSYS_USE_BEST_PARAMS:-0}"  # set to 1 after tune
-export RECSYS_NUM_WORKERS="${RECSYS_NUM_WORKERS:-8}"  # DataLoader workers (0 = GPU starves)
+# DataLoader workers. This dataset ships huge batches (2048 x 100 history) through
+# worker IPC; 8 workers often thrashes RAM/CPU and is slower than 0. Try 2 if you experiment.
+export RECSYS_NUM_WORKERS="${RECSYS_NUM_WORKERS:-0}"
 
 # Optuna (optional step)
 export RECSYS_TUNE_TRIALS="${RECSYS_TUNE_TRIALS:-30}"

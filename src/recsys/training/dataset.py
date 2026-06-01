@@ -292,7 +292,8 @@ class RecencyWeightedSampler(Sampler[int]):
     def __iter__(self):
         rng = np.random.default_rng(self.seed + self.epoch)
         indices = rng.choice(self.n, size=self.num_samples, replace=True, p=self.probs)
-        return iter(indices.tolist())
+        # Avoid .tolist() on multi-million-row sets (huge RAM + slow epoch start).
+        return iter(indices)
 
     def __len__(self) -> int:
         return self.num_samples

@@ -69,22 +69,28 @@ def encode_history_batch(
     history_days_ago: torch.Tensor | None = None,
     train_cfg: TrainConfig | None = None,
     training_mask_prob: float = 0.0,
+    history_emb: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Embed each history slot and reduce to a single per-user vector.
 
     Routes through the SequenceEncoder when the model has one and we were given
     the auxiliary signals (scores, completion, days_ago); otherwise falls back
     to the weighted mean pool.
+
+    ``history_emb``: optional precomputed [B, T, D] from `_batch_encode_anime_by_index`.
     """
-    b, t = history_idx.shape
-    flat = history_idx.reshape(-1)
-    emb = model.encode_anime(
-        anime_tensors["numerical"][flat],
-        anime_tensors["genres"][flat],
-        anime_tensors["studio_idx"][flat],
-        anime_tensors["synopsis"][flat],
-    )
-    emb = emb.view(b, t, -1)
+    if history_emb is not None:
+        emb = history_emb
+    else:
+        b, t = history_idx.shape
+        flat = history_idx.reshape(-1)
+        emb = model.encode_anime(
+            anime_tensors["numerical"][flat],
+            anime_tensors["genres"][flat],
+            anime_tensors["studio_idx"][flat],
+            anime_tensors["synopsis"][flat],
+        )
+        emb = emb.view(b, t, -1)
 
     can_use_seq = (
         model.sequence_encoder is not None
@@ -118,31 +124,61 @@ def _gather_anime_features(anime_tensors: dict, idx: torch.Tensor) -> tuple[torc
     )
 
 
+def _batch_encode_anime_by_index(
+    model: TwoTowerModel,
+    anime_tensors: dict,
+    parts: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """One deduplicated item-tower pass for all index tensors (same embeddings)."""
+    if not parts:
+        return {}
+    names: list[str] = []
+    flats: list[torch.Tensor] = []
+    shapes: dict[str, tuple[int, ...]] = {}
+    for name, idx in parts.items():
+        shapes[name] = tuple(idx.shape)
+        flats.append(idx.reshape(-1))
+        names.append(name)
+    all_idx = torch.cat(flats)
+    unique_idx, inverse = torch.unique(all_idx, return_inverse=True)
+    unique_emb = model.encode_anime(*_gather_anime_features(anime_tensors, unique_idx))
+    out: dict[str, torch.Tensor] = {}
+    offset = 0
+    for name in names:
+        n_elem = int(np.prod(shapes[name]))
+        inv = inverse[offset : offset + n_elem]
+        emb = unique_emb[inv]
+        out[name] = emb.view(*shapes[name], -1)
+        offset += n_elem
+    return out
+
+
 def _sample_catalog_negatives(
     n_anime: int,
     positives_per_user: list[set[int]],
     k: int,
     rng: np.random.Generator,
-    max_tries: int = 50,
 ) -> np.ndarray:
+    """Vectorized rejection sampling — same distribution as the legacy Python loop."""
     b = len(positives_per_user)
     out = np.empty((b, k), dtype=np.int64)
+    chunk = max(k * 8, 256)
     for i, pos in enumerate(positives_per_user):
+        if not pos:
+            out[i] = rng.integers(0, n_anime, size=k, dtype=np.int64)
+            continue
+        pos_arr = np.fromiter(pos, count=len(pos), dtype=np.int64)
         chosen: list[int] = []
-        tries = 0
-        while len(chosen) < k and tries < k * max_tries:
-            cands = rng.integers(0, n_anime, size=k * 2)
-            for c in cands:
-                if int(c) not in pos and int(c) not in chosen:
-                    chosen.append(int(c))
-                    if len(chosen) >= k:
-                        break
-            tries += 1
         while len(chosen) < k:
-            c = int(rng.integers(0, n_anime))
-            if c not in pos:
-                chosen.append(c)
-        out[i] = np.array(chosen[:k], dtype=np.int64)
+            cands = rng.integers(0, n_anime, size=chunk, dtype=np.int64)
+            good = cands[~np.isin(cands, pos_arr, assume_unique=False)]
+            if chosen:
+                good = good[~np.isin(good, np.asarray(chosen, dtype=np.int64), assume_unique=False)]
+            for c in good:
+                chosen.append(int(c))
+                if len(chosen) >= k:
+                    break
+        out[i] = np.asarray(chosen[:k], dtype=np.int64)
     return out
 
 
@@ -346,6 +382,11 @@ def train(
 ) -> TrainArtifacts:
     rng = set_random_seed(device=device)
 
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+
     if max_train_rows is not None and len(train_df) > max_train_rows:
         train_df = train_df.sample(max_train_rows, random_state=CFG.seed)
 
@@ -363,10 +404,10 @@ def train(
     sampler = make_train_sampler(dataset, seed=CFG.seed)
     loader_kwargs: dict[str, object] = {}
     if train_cfg.num_workers > 0:
-        # Keep workers alive across epochs (avoids 10-30s respawn) and prefetch
-        # a few batches ahead so the GPU never waits on data prep.
+        # Keep workers alive across epochs. Low prefetch: each batch is large
+        # (padded history tensors); high prefetch x many workers blows RAM/IPC.
         loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = 4
+        loader_kwargs["prefetch_factor"] = 2
     loader = DataLoader(
         dataset,
         batch_size=train_cfg.batch_size,
@@ -414,7 +455,25 @@ def train(
             batch = {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
             optim.zero_grad()
             with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-                pos_anime_emb = model.encode_anime(*_gather_anime_features(anime_tensors, batch["pos_anime_idx"]))
+                k_cat = train_cfg.catalog_neg_count
+                need_pos = do_hardneg or k_cat > 0
+                user_pos: list[set[int]] | None = None
+                if need_pos:
+                    user_pos = [
+                        positives_lookup.get(int(u), set()) | {int(p)}
+                        for u, p in zip(batch["user_idx"].tolist(), batch["pos_anime_idx"].tolist())
+                    ]
+
+                encode_parts: dict[str, torch.Tensor] = {
+                    "pos": batch["pos_anime_idx"],
+                    "hist": batch["history_idx"],
+                }
+                if k_cat > 0 and user_pos is not None:
+                    neg_idx = _sample_catalog_negatives(n_anime, user_pos, k_cat, rng)
+                    encode_parts["cat"] = torch.from_numpy(neg_idx).to(device)
+
+                encoded = _batch_encode_anime_by_index(model, anime_tensors, encode_parts)
+                pos_anime_emb = encoded["pos"]
                 pooled_hist = encode_history_batch(
                     model,
                     batch["history_idx"],
@@ -426,17 +485,14 @@ def train(
                     history_days_ago=batch["history_days_ago"],
                     train_cfg=train_cfg,
                     training_mask_prob=seq_mask_prob,
+                    history_emb=encoded["hist"],
                 )
                 user_emb = model.encode_user(
                     pooled_hist, batch["genre_affinity"], batch["centered_score"], batch["recency"]
                 )
 
                 hard_emb = None
-                if do_hardneg:
-                    user_pos = [
-                        positives_lookup.get(int(u), set()) | {int(p)}
-                        for u, p in zip(batch["user_idx"].tolist(), batch["pos_anime_idx"].tolist())
-                    ]
+                if do_hardneg and user_pos is not None:
                     hard_emb = miner.mine(
                         user_emb,
                         user_pos,
@@ -445,18 +501,7 @@ def train(
                         candidate_pool_k=cur_curriculum_k,
                     )
 
-                catalog_neg_emb = None
-                k_cat = train_cfg.catalog_neg_count
-                if k_cat > 0:
-                    user_pos = [
-                        positives_lookup.get(int(u), set()) | {int(p)}
-                        for u, p in zip(batch["user_idx"].tolist(), batch["pos_anime_idx"].tolist())
-                    ]
-                    neg_idx = _sample_catalog_negatives(n_anime, user_pos, k_cat, rng)
-                    neg_t = torch.from_numpy(neg_idx).to(device)
-                    flat = neg_t.reshape(-1)
-                    neg_emb = model.encode_anime(*_gather_anime_features(anime_tensors, flat))
-                    catalog_neg_emb = neg_emb.view(neg_t.size(0), k_cat, -1)
+                catalog_neg_emb = encoded.get("cat")
 
                 pos_weight = batch["pos_weight"] if train_cfg.use_completion_weighted_loss else None
                 loss = combined_ranking_loss(
