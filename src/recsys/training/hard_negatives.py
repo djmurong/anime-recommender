@@ -6,6 +6,34 @@ import torch
 from recsys.models.two_tower import TwoTowerModel, encode_all_anime
 
 
+def _filter_and_sample(
+    row: np.ndarray,
+    pos: set[int],
+    k: int,
+    rng: np.random.Generator,
+    n_anime: int,
+) -> np.ndarray:
+    """Drop positives from a FAISS neighbor row and sample k indices."""
+    row = row[row >= 0]
+    if pos:
+        pos_arr = np.fromiter(pos, count=len(pos), dtype=np.int64)
+        row = row[~np.isin(row, pos_arr, assume_unique=False)]
+    if len(row) >= k:
+        return rng.choice(row, size=k, replace=False)
+    chosen = row.astype(np.int64, copy=True)
+    deficit = k - len(chosen)
+    while len(chosen) < k:
+        extra = rng.integers(0, n_anime, size=max(deficit * 4, 64), dtype=np.int64)
+        if pos:
+            extra = extra[~np.isin(extra, pos_arr, assume_unique=False)]
+        for c in extra:
+            if int(c) not in pos and (len(chosen) == 0 or c not in chosen):
+                chosen = np.append(chosen, c)
+                if len(chosen) >= k:
+                    break
+    return chosen[:k]
+
+
 class HardNegativeMiner:
     """FAISS-backed hard negative miner with optional curriculum.
 
@@ -62,22 +90,7 @@ class HardNegativeMiner:
             _scores, idxs = self._index.search(q, pool)
             chosen = np.empty((q.shape[0], k), dtype=np.int64)
             for i, row in enumerate(idxs):
-                pos = positives_per_user[i]
-                cands = np.array(
-                    [int(a) for a in row if int(a) >= 0 and int(a) not in pos],
-                    dtype=np.int64,
-                )
-                if len(cands) >= k:
-                    sample = rng.choice(cands, size=k, replace=False)
-                else:
-                    # Top up with uniform draws if too few survived filtering.
-                    deficit = k - len(cands)
-                    rand = rng.integers(0, self.n_anime, size=deficit * 4)
-                    rand = np.array([int(r) for r in rand if int(r) not in pos][:deficit])
-                    while len(rand) < deficit:
-                        rand = np.append(rand, int(rng.integers(0, self.n_anime)))
-                    sample = np.concatenate([cands, rand[:deficit]])
-                chosen[i] = sample
+                chosen[i] = _filter_and_sample(row, positives_per_user[i], k, rng, self.n_anime)
             return torch.from_numpy(self._anime_emb_cpu[chosen]).to(user_emb.device)
 
         # Legacy path: pull a small oversample and take the top-k.
@@ -88,13 +101,8 @@ class HardNegativeMiner:
             pos = positives_per_user[i]
             cands = [int(a) for a in row if int(a) not in pos]
             if len(cands) >= k:
-                chosen[i] = cands[:k]
+                chosen[i] = np.asarray(cands[:k], dtype=np.int64)
             else:
-                deficit = k - len(cands)
-                rand = rng.integers(0, self.n_anime, size=deficit * 4)
-                rand = [int(r) for r in rand if int(r) not in pos][:deficit]
-                while len(rand) < deficit:
-                    rand.append(int(rng.integers(0, self.n_anime)))
-                chosen[i] = np.array(cands + rand[:deficit], dtype=np.int64)
+                chosen[i] = _filter_and_sample(row, pos, k, rng, self.n_anime)
 
         return torch.from_numpy(self._anime_emb_cpu[chosen]).to(user_emb.device)

@@ -354,16 +354,21 @@ def _val_metrics(
     }
 
 
-def _curriculum_hard_neg_k(epoch: int, train_cfg: TrainConfig) -> int:
+def _curriculum_hard_neg_k(epoch: int, train_cfg: TrainConfig, n_anime: int) -> int:
     """Linear schedule: K_easy at hard_neg_start_epoch -> K_hard at epochs."""
     if not train_cfg.hard_neg_curriculum:
         return -1  # sentinel: miner uses its default oversample
     if epoch < train_cfg.hard_neg_start_epoch:
-        return train_cfg.hard_neg_K_easy
-    span = max(train_cfg.epochs - train_cfg.hard_neg_start_epoch, 1)
-    frac = min(max((epoch - train_cfg.hard_neg_start_epoch) / span, 0.0), 1.0)
-    k = train_cfg.hard_neg_K_easy + (train_cfg.hard_neg_K_hard - train_cfg.hard_neg_K_easy) * frac
-    return int(round(k))
+        k = train_cfg.hard_neg_K_easy
+    else:
+        span = max(train_cfg.epochs - train_cfg.hard_neg_start_epoch, 1)
+        frac = min(max((epoch - train_cfg.hard_neg_start_epoch) / span, 0.0), 1.0)
+        k = train_cfg.hard_neg_K_easy + (
+            train_cfg.hard_neg_K_hard - train_cfg.hard_neg_K_easy
+        ) * frac
+        k = int(round(k))
+    # Never scan (almost) the full catalog each batch.
+    return int(min(max(k, train_cfg.hard_neg_K_hard), max(n_anime // 4, train_cfg.hard_neg_K_hard)))
 
 
 def train(
@@ -435,17 +440,29 @@ def train(
     best_epoch = -1
     ckpt_path = ckpt_path or (MODELS_DIR / "two_tower.pt")
     seq_mask_prob = train_cfg.seq_p_mask_recent if train_cfg.use_sequence_encoder else 0.0
+    log_every = max(len(loader) // 20, 1)  # ~5% progress lines in batch logs (SLURM)
 
     for epoch in range(1, train_cfg.epochs + 1):
         do_hardneg = train_cfg.hard_neg_ratio > 0 and epoch >= train_cfg.hard_neg_start_epoch
         if do_hardneg and (
             (epoch - train_cfg.hard_neg_start_epoch) % train_cfg.hard_neg_refresh_every == 0
         ):
+            if progress:
+                print(f"[epoch {epoch}] refreshing hard-negative FAISS index...", flush=True)
             miner.refresh(model, anime_tensors, device)
-        cur_curriculum_k = _curriculum_hard_neg_k(epoch, train_cfg) if do_hardneg else -1
+        cur_curriculum_k = (
+            _curriculum_hard_neg_k(epoch, train_cfg, n_anime) if do_hardneg else -1
+        )
 
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
+
+        if progress:
+            print(
+                f"[epoch {epoch}] training {len(loader)} batches "
+                f"(hard_neg={do_hardneg}, pool_k={cur_curriculum_k})...",
+                flush=True,
+            )
 
         model.train()
         running = 0.0
@@ -526,6 +543,12 @@ def train(
             n_batches += 1
             if progress:
                 iterator.set_postfix(loss=f"{running / max(n_batches, 1):.4f}")
+                if n_batches % log_every == 0 or n_batches == len(loader):
+                    print(
+                        f"[epoch {epoch}] batch {n_batches}/{len(loader)} "
+                        f"loss={running / n_batches:.4f}",
+                        flush=True,
+                    )
 
         avg_loss = running / max(n_batches, 1)
 
@@ -537,7 +560,8 @@ def train(
             if progress:
                 print(
                     f"[epoch {epoch}] loss={avg_loss:.4f} val_ndcg@10={score:.4f} "
-                    f"val_recall@10={metrics['recall@10']:.4f}"
+                    f"val_recall@10={metrics['recall@10']:.4f}",
+                    flush=True,
                 )
             if score > best_val:
                 best_val = score

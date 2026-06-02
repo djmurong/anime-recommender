@@ -96,7 +96,9 @@ class TrainConfig:
     # down to K_hard at the final epoch. Earlier epochs see far-out (easy) negatives;
     # later epochs see near-miss (hard) negatives.
     hard_neg_curriculum: bool = True
-    hard_neg_K_easy: int = 5000
+    # Easy pool size for curriculum (epoch 2). Keep well below catalog size — 5000
+    # on ~6k items scans almost the whole index every batch and stalls training.
+    hard_neg_K_easy: int = 512
     hard_neg_K_hard: int = 200
 
 
