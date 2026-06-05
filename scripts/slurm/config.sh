@@ -33,6 +33,8 @@ export RECSYS_USE_BEST_PARAMS="${RECSYS_USE_BEST_PARAMS:-0}"  # set to 1 after t
 # DataLoader workers. This dataset ships huge batches (2048 x 100 history) through
 # worker IPC; 8 workers often thrashes RAM/CPU and is slower than 0. Try 2 if you experiment.
 export RECSYS_NUM_WORKERS="${RECSYS_NUM_WORKERS:-0}"
+# Hard-neg curriculum easy pool (default 5000 in config.py). Use 512 for fast runs:
+# export RECSYS_HARD_NEG_K_EASY=512
 
 # Optuna (optional step)
 export RECSYS_TUNE_TRIALS="${RECSYS_TUNE_TRIALS:-30}"

@@ -27,8 +27,9 @@ fi
 
 # DataLoader workers (default 8 via config.sh; override with RECSYS_NUM_WORKERS=0 etc.)
 PERF_FLAGS=(--num-workers "${RECSYS_NUM_WORKERS}")
+export RECSYS_HARD_NEG_K_EASY="${RECSYS_HARD_NEG_K_EASY:-}"
 
-echo "=== train_two_tower epochs=${RECSYS_EPOCHS} batch=${RECSYS_BATCH_SIZE} workers=${RECSYS_NUM_WORKERS} ==="
+echo "=== train_two_tower epochs=${RECSYS_EPOCHS} batch=${RECSYS_BATCH_SIZE} workers=${RECSYS_NUM_WORKERS} hard_neg_K_easy=${RECSYS_HARD_NEG_K_EASY:-config default} ==="
 python -m recsys.cli.train_two_tower \
   "${BEST_FLAG[@]}" \
   --epochs "${RECSYS_EPOCHS}" \

@@ -367,8 +367,8 @@ def _curriculum_hard_neg_k(epoch: int, train_cfg: TrainConfig, n_anime: int) -> 
             train_cfg.hard_neg_K_hard - train_cfg.hard_neg_K_easy
         ) * frac
         k = int(round(k))
-    # Never scan (almost) the full catalog each batch.
-    return int(min(max(k, train_cfg.hard_neg_K_hard), max(n_anime // 4, train_cfg.hard_neg_K_hard)))
+    # Cap at catalog size only (allows K_easy=5000 for ablation vs smaller pools).
+    return int(min(max(k, train_cfg.hard_neg_K_hard), n_anime))
 
 
 def train(

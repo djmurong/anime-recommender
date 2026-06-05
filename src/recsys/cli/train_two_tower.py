@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pickle
 from dataclasses import asdict
 
@@ -96,6 +97,8 @@ def main() -> None:
     # time without re-running Optuna).
     if args.num_workers is not None:
         train_cfg.num_workers = args.num_workers
+    if os.environ.get("RECSYS_HARD_NEG_K_EASY"):
+        train_cfg.hard_neg_K_easy = int(os.environ["RECSYS_HARD_NEG_K_EASY"])
 
     print(f"Training on device={device}")
     print(f"  config={asdict(train_cfg)}")
