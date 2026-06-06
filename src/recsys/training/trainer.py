@@ -354,6 +354,32 @@ def _val_metrics(
     }
 
 
+def stabilize_train_config(train_cfg: TrainConfig) -> list[str]:
+    """Clamp hyperparams that often destabilize full-data AMP training.
+
+    Optuna trials use fewer rows/epochs; aggressive temperature/lr combos that
+    score well in tune can overflow sampled-softmax logits in fp16 on the full run.
+    """
+    notes: list[str] = []
+
+    temp = float(train_cfg.temperature)
+    if temp < 0.05:
+        train_cfg.temperature = 0.05
+        notes.append(f"temperature {temp:g} -> 0.05")
+
+    lr = float(train_cfg.lr)
+    lr_cap = 2e-3 if train_cfg.batch_size >= 1024 else 1.5e-3
+    if lr > lr_cap:
+        train_cfg.lr = lr_cap
+        notes.append(f"lr {lr:g} -> {lr_cap:g}")
+
+    if train_cfg.grad_clip <= 0:
+        train_cfg.grad_clip = 1.0
+        notes.append("grad_clip 0 -> 1.0")
+
+    return notes
+
+
 def _curriculum_hard_neg_k(epoch: int, train_cfg: TrainConfig, n_anime: int) -> int:
     """Linear schedule: K_easy at hard_neg_start_epoch -> K_hard at epochs."""
     if not train_cfg.hard_neg_curriculum:
@@ -386,6 +412,10 @@ def train(
     max_train_rows: int | None = None,
 ) -> TrainArtifacts:
     rng = set_random_seed(device=device)
+
+    stability_notes = stabilize_train_config(train_cfg)
+    if stability_notes and progress:
+        print(f"  stabilized train config: {', '.join(stability_notes)}", flush=True)
 
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -441,6 +471,7 @@ def train(
     ckpt_path = ckpt_path or (MODELS_DIR / "two_tower.pt")
     seq_mask_prob = train_cfg.seq_p_mask_recent if train_cfg.use_sequence_encoder else 0.0
     log_every = max(len(loader) // 20, 1)  # ~5% progress lines in batch logs (SLURM)
+    nonfinite_skips = 0
 
     for epoch in range(1, train_cfg.epochs + 1):
         do_hardneg = train_cfg.hard_neg_ratio > 0 and epoch >= train_cfg.hard_neg_start_epoch
@@ -532,10 +563,32 @@ def train(
                     pos_weight=pos_weight,
                 )
 
+            if not torch.isfinite(loss):
+                nonfinite_skips += 1
+                if progress and nonfinite_skips <= 5:
+                    print(
+                        f"[epoch {epoch}] skip batch {n_batches + 1}: non-finite loss",
+                        flush=True,
+                    )
+                optim.zero_grad(set_to_none=True)
+                continue
+
             scaler.scale(loss).backward()
             if train_cfg.grad_clip > 0:
                 scaler.unscale_(optim)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), train_cfg.grad_clip
+                )
+                if not torch.isfinite(grad_norm):
+                    nonfinite_skips += 1
+                    if progress and nonfinite_skips <= 5:
+                        print(
+                            f"[epoch {epoch}] skip batch {n_batches + 1}: non-finite grad norm",
+                            flush=True,
+                        )
+                    optim.zero_grad(set_to_none=True)
+                    scaler.update()
+                    continue
             scaler.step(optim)
             scaler.update()
 
@@ -551,6 +604,9 @@ def train(
                     )
 
         avg_loss = running / max(n_batches, 1)
+        if nonfinite_skips and progress:
+            print(f"[epoch {epoch}] skipped {nonfinite_skips} non-finite batches", flush=True)
+        nonfinite_skips = 0
 
         if epoch % train_cfg.val_every_epoch == 0:
             metrics = _val_metrics(

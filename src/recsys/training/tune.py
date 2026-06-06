@@ -11,7 +11,7 @@ from optuna.samplers import TPESampler
 
 from recsys.config import ARTIFACTS_DIR, CFG, TrainConfig, set_random_seed
 from recsys.data.features_user import UserFeaturePack
-from recsys.training.trainer import build_model_from_features, train
+from recsys.training.trainer import build_model_from_features, stabilize_train_config, train
 
 
 def make_objective(
@@ -60,6 +60,7 @@ def make_objective(
             hard_neg_K_easy=CFG.train.hard_neg_K_easy,
             hard_neg_K_hard=CFG.train.hard_neg_K_hard,
         )
+        stabilize_train_config(cfg)
         model = build_model_from_features(feats, cfg, popularity_bias=popularity_bias)
         artifacts = train(
             model=model,
