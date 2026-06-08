@@ -18,8 +18,11 @@ fi
 # shellcheck source=_common.sh
 source "${_SLURM_DIR}/_common.sh"
 
-python -c "import torch; print('cuda available:', torch.cuda.is_available())"
+python -c "import torch; print('torch', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
 echo "=== tune (trials=${RECSYS_TUNE_TRIALS}, max_rows=${RECSYS_TUNE_MAX_ROWS}) ==="
-python -m recsys.cli.tune --trials "${RECSYS_TUNE_TRIALS}" --max-train-rows "${RECSYS_TUNE_MAX_ROWS}"
+python -m recsys.cli.tune \
+  --device cuda \
+  --trials "${RECSYS_TUNE_TRIALS}" \
+  --max-train-rows "${RECSYS_TUNE_MAX_ROWS}"
 echo "=== done — set RECSYS_USE_BEST_PARAMS=1 for training ==="

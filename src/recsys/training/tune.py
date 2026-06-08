@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import optuna
 import pandas as pd
+import torch
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
@@ -22,6 +23,7 @@ def make_objective(
     user_map: dict[str, int],
     anime_map: dict[int, int],
     popularity_bias: np.ndarray,
+    device: torch.device,
     base_epochs: int = 6,
     max_train_rows: int | None = None,
 ):
@@ -71,7 +73,7 @@ def make_objective(
             user_map=user_map,
             anime_map=anime_map,
             train_cfg=cfg,
-            device=CFG.device,
+            device=device,
             ckpt_path=ARTIFACTS_DIR / "models" / f"trial_{trial.number}.pt",
             progress=False,
             max_train_rows=max_train_rows,
@@ -94,8 +96,10 @@ def run_study(
     n_trials: int = 30,
     out_path: Path | None = None,
     max_train_rows: int | None = 2_000_000,
+    device: torch.device | None = None,
 ) -> dict:
-    set_random_seed()
+    device = device or CFG.device
+    set_random_seed(device=device)
     sampler = TPESampler(seed=CFG.tune.sampler_seed)
     pruner = MedianPruner(n_warmup_steps=CFG.tune.pruner_warmup_epochs)
     study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
@@ -107,6 +111,7 @@ def run_study(
         user_map,
         anime_map,
         popularity_bias,
+        device=device,
         max_train_rows=max_train_rows,
     )
     study.optimize(objective, n_trials=n_trials)
