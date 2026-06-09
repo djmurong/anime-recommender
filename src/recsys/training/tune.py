@@ -28,6 +28,7 @@ def make_objective(
     max_train_rows: int | None = None,
 ):
     def objective(trial: optuna.Trial) -> float:
+        print(f"[tune] trial {trial.number} starting...", flush=True)
         cfg = TrainConfig(
             embedding_dim=trial.suggest_categorical("embedding_dim", [64, 128, 256]),
             hidden_dim=256,
@@ -62,7 +63,14 @@ def make_objective(
             hard_neg_K_easy=CFG.train.hard_neg_K_easy,
             hard_neg_K_hard=CFG.train.hard_neg_K_hard,
         )
-        stabilize_train_config(cfg)
+        notes = stabilize_train_config(cfg)
+        if notes:
+            print(f"[tune] trial {trial.number} stabilized: {', '.join(notes)}", flush=True)
+        print(
+            f"[tune] trial {trial.number} params: batch_size={cfg.batch_size} "
+            f"lr={cfg.lr:.4g} temp={cfg.temperature} hard_neg_ratio={cfg.hard_neg_ratio}",
+            flush=True,
+        )
         model = build_model_from_features(feats, cfg, popularity_bias=popularity_bias)
         artifacts = train(
             model=model,
@@ -75,11 +83,16 @@ def make_objective(
             train_cfg=cfg,
             device=device,
             ckpt_path=ARTIFACTS_DIR / "models" / f"trial_{trial.number}.pt",
-            progress=False,
+            progress=True,
             max_train_rows=max_train_rows,
         )
         if artifacts.best_val < 0:
             raise optuna.TrialPruned()
+        print(
+            f"[tune] trial {trial.number} done: best_val_ndcg@10={artifacts.best_val:.4f} "
+            f"(epoch {artifacts.best_epoch})",
+            flush=True,
+        )
         return artifacts.best_val
 
     return objective
@@ -114,7 +127,17 @@ def run_study(
         device=device,
         max_train_rows=max_train_rows,
     )
-    study.optimize(objective, n_trials=n_trials)
+    def _on_trial_done(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        val = trial.value
+        val_s = f"{val:.4f}" if val is not None else "pruned/failed"
+        print(f"[tune] Optuna recorded trial {trial.number}: value={val_s}", flush=True)
+
+    print(
+        f"[tune] starting study: {n_trials} trials, max_train_rows={max_train_rows}, "
+        f"device={device}, hard_neg_K_easy={CFG.train.hard_neg_K_easy}",
+        flush=True,
+    )
+    study.optimize(objective, n_trials=n_trials, callbacks=[_on_trial_done])
     best = {
         "value": study.best_value,
         "params": study.best_params,

@@ -18,7 +18,10 @@ fi
 # shellcheck source=_common.sh
 source "${_SLURM_DIR}/_common.sh"
 
-python -c "import torch; print('torch', torch.__version__, 'cuda:', torch.cuda.is_available())"
+echo "=== GPU sanity (SLURM) ==="
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+nvidia-smi -L 2>/dev/null || echo "WARNING: nvidia-smi failed"
+python -c "import torch; print('torch', torch.__version__, 'cuda:', torch.cuda.is_available(), 'cuda_version:', getattr(torch.version, 'cuda', None))"
 
 echo "=== tune (trials=${RECSYS_TUNE_TRIALS}, max_rows=${RECSYS_TUNE_MAX_ROWS}) ==="
 python -m recsys.cli.tune \
