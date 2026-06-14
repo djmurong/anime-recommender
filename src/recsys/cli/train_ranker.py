@@ -44,6 +44,24 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--neg-per-pos", type=int, default=4)
     p.add_argument(
+        "--hard-neg-frac",
+        type=float,
+        default=0.5,
+        help="Fraction of negatives drawn from FAISS item neighbors (0 = all random).",
+    )
+    p.add_argument(
+        "--rank-loss-weight", type=float, default=1.0,
+        help="Weight on the listwise ranking (pos>neg) loss.",
+    )
+    p.add_argument(
+        "--aux-loss-weight", type=float, default=0.5,
+        help="Weight on the auxiliary multi-task head losses (completion/rating/drop).",
+    )
+    p.add_argument(
+        "--distill-weight", type=float, default=0.5,
+        help="Weight on two-tower retrieval-score distillation.",
+    )
+    p.add_argument(
         "--device",
         choices=["auto", "cpu", "cuda", "mps"],
         default="cpu",
@@ -99,9 +117,13 @@ def main() -> None:
         neg_per_pos=args.neg_per_pos,
         use_position_bias=not args.no_position_bias,
         ckpt_path=MODELS_DIR / "ranker.pt",
+        rank_loss_weight=args.rank_loss_weight,
+        aux_loss_weight=args.aux_loss_weight,
+        distill_weight=args.distill_weight,
+        hard_neg_frac=args.hard_neg_frac,
     )
     print(
-        f"Best train loss = {artifacts.best_val:.4f} at epoch {artifacts.best_epoch}; "
+        f"Best val AUC = {artifacts.best_val:.4f} at epoch {artifacts.best_epoch}; "
         f"saved -> {MODELS_DIR / 'ranker.pt'}"
     )
 

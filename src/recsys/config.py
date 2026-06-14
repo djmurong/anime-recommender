@@ -116,6 +116,9 @@ class RetrievalConfig:
     pool_retrieve: int = 1000
     pool_prerank: int = 200
     pool_rank: int = 50
+    # Stage-3 blend of standardized retrieval vs ranker scores (see Cascade.rank_blend).
+    # 0.7 keeps retrieval dominant so the MMoE ranker re-orders without tanking recall.
+    rank_blend: float = 0.7
     # Legacy aliases used by the old recommend_for_known_user serving helper.
     candidate_pool: int = 200
     rerank_pool: int = 100

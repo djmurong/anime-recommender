@@ -48,6 +48,21 @@ class RerankerProtocol(Protocol):
     ) -> np.ndarray: ...
 
 
+def _zscore(x: np.ndarray) -> np.ndarray:
+    """Per-pool standardization so two score scales can be blended additively.
+
+    Returns zeros when the pool has near-zero variance (e.g. a single survivor),
+    which makes the blend degrade gracefully to "no contribution from this term".
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return x.astype(np.float64)
+    sd = x.std()
+    if sd < 1e-8:
+        return np.zeros_like(x)
+    return (x - x.mean()) / sd
+
+
 def _mmr_reranker_factory(lambda_: float) -> RerankerProtocol:
     def _fn(candidate_idxs, candidate_scores, candidate_emb, k):
         return mmr_rerank(
@@ -94,6 +109,12 @@ class Cascade:
     pool_retrieve: int = 1000
     pool_prerank: int = 200
     pool_rank: int = 50
+    # Stage-3 score blend: rank_scores = blend * z(retrieval) + (1 - blend) * z(ranker).
+    # 1.0 = pure retrieval ordering (ranker ignored, reproduces the no-ranker
+    # cascade); 0.0 = pure ranker. Values in between keep the retriever's
+    # relevance signal while letting the ranker re-order, which avoids the recall
+    # collapse from letting a multi-task ranker fully replace retrieval.
+    rank_blend: float = 1.0
 
     def recommend(
         self,
@@ -159,12 +180,22 @@ class Cascade:
         scores_pre = pre_scores[top_local]
 
         # ---- Stage 3: Rank ----
-        if self.ranker is not None:
+        # rank_blend >= 1.0 means "ignore the ranker", so we skip the forward
+        # pass entirely and keep the retrieval ordering. Otherwise we blend the
+        # standardized retrieval and ranker scores so the ranker re-orders within
+        # the retriever's relevance signal instead of overriding it.
+        blend = float(self.rank_blend)
+        if self.ranker is not None and blend < 1.0:
             item_emb_pre = self.item_emb_tensor[idxs_pre].unsqueeze(0)
             with torch.no_grad():
-                rank_scores = (
+                rank_raw = (
                     self.ranker(user_emb, item_emb_pre).squeeze(0).detach().cpu().numpy()
                 )
+            rank_raw = np.asarray(rank_raw, dtype=np.float64).reshape(-1)
+            if blend <= 0.0:
+                rank_scores = rank_raw
+            else:
+                rank_scores = blend * _zscore(scores_pre) + (1.0 - blend) * _zscore(rank_raw)
         else:
             rank_scores = scores_pre.copy()
 
@@ -214,6 +245,7 @@ def make_default_cascade(
     pool_retrieve: int = 1000,
     pool_prerank: int = 200,
     pool_rank: int = 50,
+    rank_blend: float = 1.0,
 ) -> Cascade:
     """Convenience constructor matching the defaults in `RetrievalConfig`."""
     if reranker_kind == "mmr":
@@ -234,4 +266,5 @@ def make_default_cascade(
         pool_retrieve=pool_retrieve,
         pool_prerank=pool_prerank,
         pool_rank=pool_rank,
+        rank_blend=rank_blend,
     )

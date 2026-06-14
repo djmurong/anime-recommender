@@ -52,6 +52,8 @@ class RankerDataset(Dataset):
         neg_per_pos: int = 4,
         max_position: int = 128,
         seed: int = SEED,
+        hard_neg_pool: np.ndarray | None = None,
+        hard_neg_frac: float = 0.0,
     ):
         df = train.copy()
         df["user_idx"] = df["username"].map(user_map).astype("int64")
@@ -77,6 +79,12 @@ class RankerDataset(Dataset):
         self.neg_per_pos = neg_per_pos
         self.max_position = max_position
         self.seed = seed
+        # Optional FAISS item-item neighbor table (n_anime, M): row i holds the
+        # nearest catalog neighbors of item i. A fraction of negatives are drawn
+        # from here so the ranker learns to separate genuinely similar items the
+        # user did NOT engage with, instead of trivially-easy random catalog draws.
+        self.hard_neg_pool = hard_neg_pool
+        self.hard_neg_frac = float(hard_neg_frac) if hard_neg_pool is not None else 0.0
 
         # Per-user position surrogate: index newest -> 0, oldest -> len-1.
         position_per_row = np.zeros(len(df), dtype=np.int64)
@@ -105,10 +113,28 @@ class RankerDataset(Dataset):
     def _sample_negatives(self, u: int, pos_idx: int) -> np.ndarray:
         excluded = self._positives_lookup.get(u, set())
         out: list[int] = []
+
+        # Hard negatives: nearest catalog neighbors of the positive item that the
+        # user did not engage with. Drawn first so they always get their quota.
+        n_hard = 0
+        if self.hard_neg_pool is not None and self.hard_neg_frac > 0.0:
+            n_hard = int(round(self.neg_per_pos * self.hard_neg_frac))
+            if n_hard > 0:
+                neighbors = self.hard_neg_pool[pos_idx]
+                self._rng.shuffle(neighbors := neighbors.copy())
+                for cand in neighbors:
+                    cand = int(cand)
+                    if cand == pos_idx or cand in excluded or cand in out:
+                        continue
+                    out.append(cand)
+                    if len(out) >= n_hard:
+                        break
+
+        # Remaining slots: uniform random catalog draws (easy negatives).
         tries = 0
         while len(out) < self.neg_per_pos and tries < self.neg_per_pos * 50:
             cand = int(self._rng.integers(0, self.n_anime))
-            if cand == pos_idx or cand in excluded:
+            if cand == pos_idx or cand in excluded or cand in out:
                 tries += 1
                 continue
             out.append(cand)

@@ -26,6 +26,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def rank_blend_score(
+    out: dict[str, torch.Tensor],
+    w_completion: float = 0.5,
+    w_rating: float = 0.3,
+    w_drop: float = -0.2,
+) -> torch.Tensor:
+    """Bounded blend of head outputs into a single per-candidate score.
+
+    Shared by `MMoERanker.serve_score` (inference) and the ranker training loop
+    so the objective optimized during training is exactly the score used to
+    rank at serve time. completion/drop are sigmoid-squashed to [0, 1] and
+    rating is tanh-squashed to [-1, 1] so no single head dominates.
+    """
+    return (
+        w_completion * torch.sigmoid(out["completion"])
+        + w_rating * torch.tanh(out["rating"])
+        + w_drop * torch.sigmoid(out["drop"])
+    )
+
+
 @dataclass
 class MMoEConfig:
     embedding_dim: int = 128
@@ -211,15 +231,14 @@ class MMoERanker(nn.Module):
         """Blend heads into a single per-candidate score.
 
         Default weights match the plan: reward predicted completion + rating,
-        penalize predicted drop probability. Probabilities are squashed via
-        sigmoid so the magnitudes are comparable across heads.
+        penalize predicted drop probability. All three heads are squashed into a
+        bounded range before weighting -- completion/drop via sigmoid ([0, 1])
+        and rating via tanh ([-1, 1]) -- so the unbounded rating logit can no
+        longer dominate the blend (which previously made the score track
+        rating_z instead of relevance).
         """
         out = self.forward(user_emb, item_emb, side_feats)
-        return (
-            w_completion * torch.sigmoid(out["completion"])
-            + w_rating * out["rating"]
-            + w_drop * torch.sigmoid(out["drop"])
-        )
+        return rank_blend_score(out, w_completion, w_rating, w_drop)
 
 
 class MMoEServeFn:

@@ -115,6 +115,35 @@ def main() -> None:
         default="TwoTower+Cascade+Seq+CompWeighted",
         help="Label for the cascade row in eval.md (Phase tag).",
     )
+    p.add_argument(
+        "--no-ranker",
+        action="store_true",
+        help="Force the Phase-1 cascade (ignore artifacts/models/ranker.pt even if present).",
+    )
+    p.add_argument(
+        "--mmr-lambda",
+        type=float,
+        default=None,
+        help="Override RetrievalConfig.mmr_lambda for this eval (relevance vs diversity).",
+    )
+    p.add_argument(
+        "--pool-retrieve",
+        type=int,
+        default=None,
+        help="Override RetrievalConfig.pool_retrieve (FAISS candidate count).",
+    )
+    p.add_argument(
+        "--pool-rank",
+        type=int,
+        default=None,
+        help="Override RetrievalConfig.pool_rank (survivors into the reranker).",
+    )
+    p.add_argument(
+        "--rank-blend",
+        type=float,
+        default=None,
+        help="Override RetrievalConfig.rank_blend: 1.0=pure retrieval, 0.0=pure ranker.",
+    )
     args = p.parse_args()
 
     train, val, test = load_splits()
@@ -178,10 +207,25 @@ def main() -> None:
             print("Evaluating TwoTower through the cascade...")
             index = _load_or_build_index(model_dev, feats, anime_tensors)
             item_emb_tensor = torch.from_numpy(index.embeddings).to(device)
+            mmr_lambda = (
+                args.mmr_lambda if args.mmr_lambda is not None else CFG.retrieval.mmr_lambda
+            )
+            pool_retrieve = (
+                args.pool_retrieve
+                if args.pool_retrieve is not None
+                else CFG.retrieval.pool_retrieve
+            )
+            pool_rank = (
+                args.pool_rank if args.pool_rank is not None else CFG.retrieval.pool_rank
+            )
+            rank_blend = (
+                args.rank_blend if args.rank_blend is not None else CFG.retrieval.rank_blend
+            )
+
             ranker_path = MODELS_DIR / "ranker.pt"
             ranker_fn = None
             ranker_loaded = False
-            if ranker_path.exists():
+            if ranker_path.exists() and not args.no_ranker and rank_blend < 1.0:
                 mmoe, _ = load_ranker(ranker_path, map_location=device)
                 mmoe = mmoe.to(device).eval()
                 ranker_fn = MMoEServeFn(
@@ -201,14 +245,20 @@ def main() -> None:
                 preranker=None,
                 ranker=ranker_fn,
                 reranker_kind=CFG.retrieval.reranker,
-                mmr_lambda=CFG.retrieval.mmr_lambda,
+                mmr_lambda=mmr_lambda,
                 dpp_theta=CFG.retrieval.dpp_theta,
-                pool_retrieve=CFG.retrieval.pool_retrieve,
+                pool_retrieve=pool_retrieve,
                 pool_prerank=CFG.retrieval.pool_prerank,
-                pool_rank=CFG.retrieval.pool_rank,
+                pool_rank=pool_rank,
+                rank_blend=rank_blend,
+            )
+            print(
+                f"  cascade config: pool_retrieve={pool_retrieve} pool_rank={pool_rank} "
+                f"mmr_lambda={mmr_lambda} rank_blend={rank_blend} "
+                f"ranker={'on' if ranker_loaded else 'off'}"
             )
             if ranker_loaded:
-                print(f"  using MMoE ranker from {ranker_path}")
+                print(f"  using MMoE ranker from {ranker_path} (blend={rank_blend})")
             if CFG.retrieval.reranker == "dpp":
                 cascade_name = cascade_name + "+DPP"
             results.append(
