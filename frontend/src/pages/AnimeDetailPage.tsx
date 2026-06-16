@@ -35,7 +35,11 @@ export function AnimeDetailPage() {
   }, [id])
 
   if (loading) {
-    return <p className="text-sm text-slate-400">Loading anime details...</p>
+    return (
+      <div className="rounded border border-[#bbbbbb] bg-white p-8 text-center text-[12px] text-slate-500">
+        Loading anime details...
+      </div>
+    )
   }
 
   if (!anime) {
@@ -48,47 +52,79 @@ export function AnimeDetailPage() {
   }
 
   return (
-    <section className="space-y-6">
-      <Link to="/" className="inline-flex text-sm text-indigo-300 hover:text-indigo-200">
-        ← Back to recommendations
+    <div className="space-y-3">
+      <Link to="/" className="inline-flex text-[12px] font-bold text-[#1f4392] hover:underline">
+        &laquo; Back to list
       </Link>
-      <div className="grid gap-6 md:grid-cols-[280px_1fr]">
-        <img
-          src={anime.imageUrl}
-          alt={anime.title}
-          className="h-[400px] w-full rounded-xl object-cover"
-        />
-        <div className="space-y-4">
-          <h1 className="text-3xl font-semibold text-slate-100">{anime.title}</h1>
-          <p className="text-sm text-slate-300">{anime.synopsis}</p>
-          <div className="flex flex-wrap gap-2 text-xs text-slate-300">
-            {anime.genres.map((genre) => (
-              <span key={genre} className="rounded-full border border-slate-700 px-2 py-0.5">
-                {genre}
-              </span>
-            ))}
-          </div>
-          <dl className="grid grid-cols-2 gap-2 text-sm text-slate-300">
-            <div>
-              <dt className="text-slate-400">Studio</dt>
-              <dd>{anime.studio ?? 'Unknown'}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-400">Year</dt>
-              <dd>{anime.year ?? 'Unknown'}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-400">Episodes</dt>
-              <dd>{anime.episodes ?? 'Unknown'}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-400">Popularity</dt>
-              <dd>{anime.malPopularity ?? 'N/A'}</dd>
-            </div>
-          </dl>
+
+      <div className="grid gap-3 md:grid-cols-[225px_1fr]">
+        {/* Left info column */}
+        <aside className="space-y-3">
+          <img
+            src={anime.imageUrl}
+            alt={anime.title}
+            className="w-full rounded border border-[#bbbbbb] object-cover"
+          />
           <FeedbackControls animeId={anime.id} />
-        </div>
+          <section className="overflow-hidden rounded border border-[#bbbbbb] bg-white">
+            <h3 className="bg-[#2e51a2] px-3 py-1.5 text-[12px] font-bold uppercase tracking-wide text-white">
+              Information
+            </h3>
+            <dl className="space-y-1.5 p-3 text-[12px] leading-relaxed">
+              <div>
+                <dt className="inline font-bold text-[#1c1c1c]">Type: </dt>
+                <dd className="inline text-[#1f4392]">{anime.studio ? 'TV' : 'Unknown'}</dd>
+              </div>
+              <div>
+                <dt className="inline font-bold text-[#1c1c1c]">Episodes: </dt>
+                <dd className="inline text-[#666]">{anime.episodes ?? 'Unknown'}</dd>
+              </div>
+              <div>
+                <dt className="inline font-bold text-[#1c1c1c]">Aired: </dt>
+                <dd className="inline text-[#666]">{anime.year ?? 'Unknown'}</dd>
+              </div>
+              <div>
+                <dt className="inline font-bold text-[#1c1c1c]">Studio: </dt>
+                <dd className="inline text-[#1f4392]">{anime.studio ?? 'Unknown'}</dd>
+              </div>
+              <div>
+                <dt className="inline font-bold text-[#1c1c1c]">Popularity: </dt>
+                <dd className="inline text-[#666]">#{anime.malPopularity ?? 'N/A'}</dd>
+              </div>
+              <div>
+                <dt className="inline font-bold text-[#1c1c1c]">Genres: </dt>
+                <dd className="inline text-[#1f4392]">{anime.genres.join(', ')}</dd>
+              </div>
+            </dl>
+          </section>
+        </aside>
+
+        {/* Main content */}
+        <main className="space-y-3">
+          <div className="overflow-hidden rounded border border-[#bbbbbb] bg-white">
+            <h1 className="bg-[#2e51a2] px-4 py-2 text-[18px] font-bold text-white">
+              {anime.title}
+            </h1>
+            <div className="p-4">
+              <h2 className="mb-2 border-b border-[#e5e5e5] pb-1 text-[14px] font-bold text-[#2e51a2]">
+                Synopsis
+              </h2>
+              <p className="text-[13px] leading-relaxed text-[#1c1c1c]">{anime.synopsis}</p>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                {anime.genres.map((genre) => (
+                  <span
+                    key={genre}
+                    className="rounded border border-[#2e51a2] px-2 py-0.5 text-[11px] font-bold text-[#2e51a2]"
+                  >
+                    {genre}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </main>
       </div>
-    </section>
+    </div>
   )
 }

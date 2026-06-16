@@ -9,16 +9,43 @@
 body {
   margin: 0;
   min-height: 100vh;
-  font-family:
-    Inter,
-    system-ui,
-    -apple-system,
-    Segoe UI,
-    Roboto,
-    sans-serif;
-  background-color: #020617;
+  font-family: Verdana, Arial, system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  color: #1c1c1c;
+  background-color: #e1e7f5;
 }
 
 #root {
   min-height: 100vh;
+}
+
+/* Tsugi-themed scrollbars (Firefox) */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #2e51a2 #d4dcee;
+}
+
+/* Tsugi-themed scrollbars (Chrome, Safari, Edge) */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #d4dcee;
+  border-radius: 5px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #2e51a2;
+  border: 2px solid #d4dcee;
+  border-radius: 5px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #27468d;
+}
+
+*::-webkit-scrollbar-corner {
+  background: #d4dcee;
 }
